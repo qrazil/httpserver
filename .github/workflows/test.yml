@@ -1,0 +1,108 @@
+name: Test
+
+# Builds and tests httpserver against a pinned commit/tag of
+# github.com/qrazil/m31 -- this app is one .m31 file, compiled by m31c and
+# then linked, as ordinary C, directly against the m31 runtime's own source
+# files (there is no pre-built runtime library to link against instead), so
+# every job here clones that repo at M31_REF and builds m31c from it, rather
+# than downloading a separately-published release binary: build.sh needs
+# the runtime/ sources from that same clone regardless, and m31c itself
+# (pure Rust, no dependencies) builds from source in well under a second on
+# every platform this project has measured it on, so a separate download
+# buys little once the clone is already required.
+#
+# Bump M31_REF by hand when this app should pick up a newer m31 release --
+# see qrazil/m31's own docs/apps-repo-split-decision.md section 6a for why
+# this is a manual step, not automatic, and the tradeoffs of the
+# alternatives (tracking `latest`, or a cross-repo bump-PR bot).
+env:
+  M31_REF: v0.1.0
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch: {}
+
+jobs:
+  test-linux-x86_64:
+    name: Test — Linux x86-64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout m31 (${{ env.M31_REF }})
+        uses: actions/checkout@v4
+        with:
+          repository: qrazil/m31
+          ref: ${{ env.M31_REF }}
+          path: m31
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build m31c from source
+        run: |
+          cd m31
+          cargo build --release
+          echo "LANGC=$PWD/target/release/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD" >> "$GITHUB_ENV"
+
+      - name: Build and test
+        run: bash test.sh
+
+  test-linux-aarch64:
+    name: Test — Linux aarch64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout m31 (${{ env.M31_REF }})
+        uses: actions/checkout@v4
+        with:
+          repository: qrazil/m31
+          ref: ${{ env.M31_REF }}
+          path: m31
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build m31c from source
+        run: |
+          cd m31
+          cargo build --release
+          echo "LANGC=$PWD/target/release/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD" >> "$GITHUB_ENV"
+
+      - name: Build and test
+        run: bash test.sh
+
+  test-macos-arm64:
+    name: Test — macOS (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout m31 (${{ env.M31_REF }})
+        uses: actions/checkout@v4
+        with:
+          repository: qrazil/m31
+          ref: ${{ env.M31_REF }}
+          path: m31
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build m31c from source
+        run: |
+          cd m31
+          cargo build --release
+          echo "LANGC=$PWD/target/release/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD" >> "$GITHUB_ENV"
+
+      - name: Build and test
+        run: bash test.sh
