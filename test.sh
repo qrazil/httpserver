@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# apps/httpserver's own tests: builds the real binary, runs it on a scratch
+# httpserver's own tests: builds the real binary, runs it on a scratch
 # port, and talks to it over a real socket -- curl for the simple checks, a
 # small Python client (threads, real `socket`s, nothing mocked) for the
 # concurrent-load check, which is the one this whole app exists to pass.
 #
-#   bash apps/httpserver/test.sh
+#   M31_ROOT=/path/to/m31 bash test.sh
 #
-# Run from the repository root, with the compiler built (`cargo build`).
-# Not part of gates.sh's ordinary corpus: this starts a real long-running
-# server process, which the corpus runner (run.sh) is not shaped for.
+# See build.sh's own header for what M31_ROOT (and LANGC, if the compiler
+# isn't at $M31_ROOT's own default) need to point at.
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")"
 
 WORK=$(mktemp -d)
 pass=0
@@ -27,13 +26,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! bash apps/httpserver/build.sh >"$WORK/build.log" 2>&1; then
+if ! bash build.sh >"$WORK/build.log" 2>&1; then
     bad "build" "$(cat "$WORK/build.log")"
     exit 1
 fi
-note "build: apps/httpserver/httpserver"
+note "build: ./httpserver"
 
-BIN=apps/httpserver/httpserver
+BIN=./httpserver
 PORT=$((20000 + (RANDOM % 20000)))
 BASE="http://127.0.0.1:$PORT"
 
