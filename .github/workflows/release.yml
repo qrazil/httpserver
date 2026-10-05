@@ -12,7 +12,7 @@ name: Release
 # test.yml is a hard precondition, exactly as qrazil/m31's own release.yml
 # treats its gates job: a broken build must never produce a release.
 env:
-  M31_REF: v0.1.0
+  M31_REF: v0.1.1
 
 on:
   push:
