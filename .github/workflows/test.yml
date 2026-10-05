@@ -1,15 +1,14 @@
 name: Test
 
-# Builds and tests httpserver against a pinned commit/tag of
+# Builds and tests httpserver against a pinned release of
 # github.com/qrazil/m31 -- this app is one .m31 file, compiled by m31c and
 # then linked, as ordinary C, directly against the m31 runtime's own source
-# files (there is no pre-built runtime library to link against instead), so
-# every job here clones that repo at M31_REF and builds m31c from it, rather
-# than downloading a separately-published release binary: build.sh needs
-# the runtime/ sources from that same clone regardless, and m31c itself
-# (pure Rust, no dependencies) builds from source in well under a second on
-# every platform this project has measured it on, so a separate download
-# buys little once the clone is already required.
+# files (there is no pre-built runtime library to link against instead).
+# qrazil/m31's own release tarballs bundle exactly that (config.sh +
+# runtime/, see that repo's release.yml and docs/apps-repo-split-
+# decision.md), alongside the compiler binary itself -- so each job here
+# just downloads and extracts one tarball. No git clone of that repo, no
+# Rust toolchain: `curl`, `tar` and a C compiler are everything this needs.
 #
 # Bump M31_REF by hand when this app should pick up a newer m31 release --
 # see qrazil/m31's own docs/apps-repo-split-decision.md section 6a for why
@@ -24,6 +23,7 @@ on:
   pull_request:
     branches: [ "master" ]
   workflow_dispatch: {}
+  workflow_call: {} # so release.yml can require this to pass before building a release
 
 jobs:
   test-linux-x86_64:
@@ -32,23 +32,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout m31 (${{ env.M31_REF }})
-        uses: actions/checkout@v4
-        with:
-          repository: qrazil/m31
-          ref: ${{ env.M31_REF }}
-          path: m31
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Build m31c from source
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
         run: |
-          cd m31
-          cargo build --release
-          echo "LANGC=$PWD/target/release/m31c" >> "$GITHUB_ENV"
-          echo "M31_ROOT=$PWD" >> "$GITHUB_ENV"
+          set -euo pipefail
+          curl -fsSL -o m31.tar.gz \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-linux-x86_64.tar.gz"
+          mkdir -p m31
+          tar -C m31 -xzf m31.tar.gz
+          chmod +x m31/m31c
+          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
 
       - name: Build and test
         run: bash test.sh
@@ -59,23 +52,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout m31 (${{ env.M31_REF }})
-        uses: actions/checkout@v4
-        with:
-          repository: qrazil/m31
-          ref: ${{ env.M31_REF }}
-          path: m31
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Build m31c from source
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
         run: |
-          cd m31
-          cargo build --release
-          echo "LANGC=$PWD/target/release/m31c" >> "$GITHUB_ENV"
-          echo "M31_ROOT=$PWD" >> "$GITHUB_ENV"
+          set -euo pipefail
+          curl -fsSL -o m31.tar.gz \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-linux-aarch64.tar.gz"
+          mkdir -p m31
+          tar -C m31 -xzf m31.tar.gz
+          chmod +x m31/m31c
+          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
 
       - name: Build and test
         run: bash test.sh
@@ -86,23 +72,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout m31 (${{ env.M31_REF }})
-        uses: actions/checkout@v4
-        with:
-          repository: qrazil/m31
-          ref: ${{ env.M31_REF }}
-          path: m31
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Build m31c from source
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
         run: |
-          cd m31
-          cargo build --release
-          echo "LANGC=$PWD/target/release/m31c" >> "$GITHUB_ENV"
-          echo "M31_ROOT=$PWD" >> "$GITHUB_ENV"
+          set -euo pipefail
+          curl -fsSL -o m31.tar.gz \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-macos-arm64.tar.gz"
+          mkdir -p m31
+          tar -C m31 -xzf m31.tar.gz
+          chmod +x m31/m31c
+          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
 
       - name: Build and test
         run: bash test.sh
