@@ -37,11 +37,11 @@ jobs:
           set -euo pipefail
           curl -fsSL -o m31.tar.gz \
             "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-linux-x86_64.tar.gz"
-          mkdir -p m31
-          tar -C m31 -xzf m31.tar.gz
-          chmod +x m31/m31c
-          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
-          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/m31"
+          tar -C "$RUNNER_TEMP/m31" -xzf m31.tar.gz
+          chmod +x "$RUNNER_TEMP/m31/m31c"
+          echo "LANGC=$RUNNER_TEMP/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$RUNNER_TEMP/m31" >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: '"$LANGC" fmt --check -r .'
@@ -60,11 +60,11 @@ jobs:
           set -euo pipefail
           curl -fsSL -o m31.tar.gz \
             "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-linux-aarch64.tar.gz"
-          mkdir -p m31
-          tar -C m31 -xzf m31.tar.gz
-          chmod +x m31/m31c
-          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
-          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/m31"
+          tar -C "$RUNNER_TEMP/m31" -xzf m31.tar.gz
+          chmod +x "$RUNNER_TEMP/m31/m31c"
+          echo "LANGC=$RUNNER_TEMP/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$RUNNER_TEMP/m31" >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: '"$LANGC" fmt --check -r .'
@@ -83,11 +83,11 @@ jobs:
           set -euo pipefail
           curl -fsSL -o m31.tar.gz \
             "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-macos-arm64.tar.gz"
-          mkdir -p m31
-          tar -C m31 -xzf m31.tar.gz
-          chmod +x m31/m31c
-          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
-          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/m31"
+          tar -C "$RUNNER_TEMP/m31" -xzf m31.tar.gz
+          chmod +x "$RUNNER_TEMP/m31/m31c"
+          echo "LANGC=$RUNNER_TEMP/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$RUNNER_TEMP/m31" >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: '"$LANGC" fmt --check -r .'
