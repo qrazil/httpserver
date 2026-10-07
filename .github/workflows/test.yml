@@ -44,7 +44,7 @@ jobs:
           echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
 
       - name: Check formatting
-        run: "$LANGC" fmt --check -r .
+        run: '"$LANGC" fmt --check -r .'
 
       - name: Build and test
         run: bash scripts/test.sh
@@ -67,7 +67,7 @@ jobs:
           echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
 
       - name: Check formatting
-        run: "$LANGC" fmt --check -r .
+        run: '"$LANGC" fmt --check -r .'
 
       - name: Build and test
         run: bash scripts/test.sh
@@ -90,7 +90,7 @@ jobs:
           echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
 
       - name: Check formatting
-        run: "$LANGC" fmt --check -r .
+        run: '"$LANGC" fmt --check -r .'
 
       - name: Build and test
         run: bash scripts/test.sh
