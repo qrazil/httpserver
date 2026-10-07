@@ -22,7 +22,7 @@
 #     find runtime/rt.c at all, or links against a mismatched version of
 #     it, so a missing M31_ROOT is a clear error instead of a guess.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \

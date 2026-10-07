@@ -1,8 +1,8 @@
 # `httpserver` vs. a minimal Go `net/http` server
 
-A throughput/latency comparison between `apps/httpserver` (this project's
+A throughput/latency comparison between `httpserver` (this project's
 "Hello, World!" server, built on `lib/http.m31`'s real `Handler`/`serve_conn`
-machinery, one green thread per connection) and `apps/httpserver/goserver`
+machinery, one green thread per connection) and `bench/goserver`
 (the same thing, `net/http` only, no third-party dependencies). Two findings
 came out of this exercise: the throughput/latency comparison itself, and a
 second, more interesting one about read/write timeouts and this runtime's
@@ -60,8 +60,8 @@ a load balancer's backend connection pool).
 
 ```
 # built once each, before the runs below
-cd apps/httpserver && bash build.sh                               # ./httpserver
-cd apps/httpserver/goserver && go build -o goserver main.go       # ./goserver
+bash scripts/build.sh                                           # ./httpserver
+cd bench/goserver && go build -o goserver main.go       # ./goserver
 
 # one example run (repeated at c=1,10,50,100, 2x each, both servers,
 # a fresh port and a fresh server process every time):
@@ -69,7 +69,7 @@ cd apps/httpserver/goserver && go build -o goserver main.go       # ./goserver
 hey -z 15s -c 10 http://127.0.0.1:19001/
 kill %1
 
-./goserver -port 19009 -host 127.0.0.1 &
+./bench/goserver/goserver -port 19009 -host 127.0.0.1 &
 hey -z 15s -c 10 http://127.0.0.1:19009/
 kill %1
 ```
@@ -78,7 +78,7 @@ Concurrency levels: **1** (no contention at all), **10** (at, not past, the
 carrier/GOMAXPROCS count), **50** and **100** (well past it, the "100+" the
 task asked for). Collected: requests/sec, and latency p50/p90/p99 (`hey`
 also reports p10/p25/p75/p95; the full text is in
-`apps/httpserver/bench_raw/`, alongside this file, one `.txt` per run,
+`bench/bench_raw/`, alongside this file, one `.txt` per run,
 exactly as `hey` printed it).
 
 ## Results
@@ -131,7 +131,7 @@ new runtime machinery gets out of the way instead of becoming the ceiling.
 
 ## A second finding: timeouts and the carrier ceiling
 
-The server actually benchmarked above (`apps/httpserver/main.m31`)
+The server actually benchmarked above (`main.m31`)
 deliberately does **not** call `set_read_timeout`/`set_write_timeout` on
 its connections. That was not the first thing written -- the first version
 did set both, to 30 seconds, matching `http.serve`'s own default
@@ -148,7 +148,7 @@ requests that took seconds to answer instead of microseconds. `hey -c 10`
 (at, not past, the carrier count) was always clean. The threshold tracked
 the carrier count exactly: rebuilding with `LANG_NUM_CARRIERS=4` moved the
 break point from "between 10 and 12" to "between 4 and 5." Two clean runs
-of each, reproduced here for the record (`apps/httpserver`'s shipped binary
+of each, reproduced here for the record (`httpserver`'s shipped binary
 never has this problem; this table is the *other* version, built only to
 demonstrate it):
 
@@ -193,7 +193,7 @@ was a data race, confirmed and closed under TSan; this is a scalability
 ceiling in a documented, deliberate design trade-off, with no incorrect
 behavior -- no wrong response, no corruption, no crash, just serialized
 throughput once oversubscribed). It is also not specific to
-`apps/httpserver`'s own code: `http.serve`'s own default
+`httpserver`'s own code: `http.serve`'s own default
 (`deadline()`/`TIMEOUT_MS = 30000`) sets exactly this kind of timeout on
 every connection it accepts, so **any** server built the straightforward,
 recommended way (`http.serve` plus a spawn-per-connection accept loop, once
@@ -219,7 +219,7 @@ hit the same ceiling today. Worth flagging to whoever owns
   connection externally after some wall-clock budget, which never calls
   `__poll` at all.
 
-`apps/httpserver`'s own choice (leave the timeout at its default, i.e. none)
+`httpserver`'s own choice (leave the timeout at its default, i.e. none)
 is the right one for *this* app -- a benchmark server with no real adversary
 -- and is exactly why the numbers in the first half of this file are real
 concurrent numbers rather than numbers from a server quietly falling over
@@ -230,9 +230,9 @@ watchdog mitigation.
 ## Reproducing this
 
 ```
-cd apps/httpserver
-bash build.sh                                          # ./httpserver
-(cd goserver && go build -o goserver main.go)           # ./goserver
+# from the repository root
+bash scripts/build.sh                                       # ./httpserver
+(cd bench/goserver && go build -o goserver main.go)           # ./goserver
 
 go install github.com/rakyll/hey@latest                # if not already installed
                                                          # (needs Go >= 1.24 toolchain;
@@ -243,10 +243,10 @@ go install github.com/rakyll/hey@latest                # if not already installe
 hey -z 15s -c <1|10|50|100> http://127.0.0.1:19001/
 kill %1
 
-./goserver -port 19009 -host 127.0.0.1 &
+./bench/goserver/goserver -port 19009 -host 127.0.0.1 &
 hey -z 15s -c <1|10|50|100> http://127.0.0.1:19009/
 kill %1
 ```
 
 Raw `hey` output for all 16 runs behind the tables above is in
-`apps/httpserver/bench_raw/*.txt` (named `<server>_c<concurrency>_run<N>.txt`).
+`bench/bench_raw/*.txt` (named `<server>_c<concurrency>_run<N>.txt`).

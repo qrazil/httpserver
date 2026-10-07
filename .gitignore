@@ -1,5 +1,5 @@
-# The built programs. `bash apps/httpserver/build.sh`, `bash apps/httpserver/
-# build_scaling.sh` and `go build` (in goserver/) make these.
+# The built programs. `bash scripts/build.sh`, `bash scripts/
+# build_scaling.sh` and `go build` (in bench/goserver/) make these.
 httpserver
 httpserver_scaling
-goserver/goserver
+bench/goserver/goserver

@@ -1,0 +1,3 @@
+# httpserver: a small HTTP server written in m31.
+name httpserver
+version 0.1.1

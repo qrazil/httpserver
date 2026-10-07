@@ -12,7 +12,7 @@ name: Release
 # test.yml is a hard precondition, exactly as qrazil/m31's own release.yml
 # treats its gates job: a broken build must never produce a release.
 env:
-  M31_REF: v0.1.1
+  M31_REF: v0.2.0
 
 on:
   push:
@@ -50,8 +50,8 @@ jobs:
           set -euo pipefail
           OUT=dist/httpserver-linux-x86_64
           mkdir -p "$OUT"
-          OUT="$OUT/httpserver" bash build.sh
-          cp README.md BENCHMARK.md SCALING.md "$OUT/" 2>/dev/null || true
+          OUT="$OUT/httpserver" bash scripts/build.sh
+          cp README.md bench/BENCHMARK.md bench/SCALING.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           httpserver — Linux x86-64 release build
           Built from commit: ${GITHUB_SHA}
@@ -93,8 +93,8 @@ jobs:
           set -euo pipefail
           OUT=dist/httpserver-linux-aarch64
           mkdir -p "$OUT"
-          OUT="$OUT/httpserver" bash build.sh
-          cp README.md BENCHMARK.md SCALING.md "$OUT/" 2>/dev/null || true
+          OUT="$OUT/httpserver" bash scripts/build.sh
+          cp README.md bench/BENCHMARK.md bench/SCALING.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           httpserver — Linux aarch64 release build
           Built from commit: ${GITHUB_SHA}
@@ -136,8 +136,8 @@ jobs:
           set -euo pipefail
           OUT=dist/httpserver-macos-arm64
           mkdir -p "$OUT"
-          OUT="$OUT/httpserver" bash build.sh
-          cp README.md BENCHMARK.md SCALING.md "$OUT/" 2>/dev/null || true
+          OUT="$OUT/httpserver" bash scripts/build.sh
+          cp README.md bench/BENCHMARK.md bench/SCALING.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           httpserver — macOS arm64 (Apple Silicon) release build
           Built from commit: ${GITHUB_SHA}

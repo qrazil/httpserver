@@ -1,8 +1,8 @@
-// goserver: the minimal, fair comparison baseline for apps/httpserver -- a
+// goserver: the minimal, fair comparison baseline for httpserver -- a
 // "Hello, World!" HTTP/1.1 server using ONLY Go's standard library
 // (net/http), no third-party dependencies. Same response body, same status
 // code, same configurable host/port shape as the m31 server it is measured
-// against (apps/httpserver/BENCHMARK.md).
+// against (bench/BENCHMARK.md).
 //
 //	go build -o goserver main.go
 //	./goserver                      listen on 0.0.0.0:8080
