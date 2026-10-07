@@ -9,7 +9,7 @@
 #
 # See build.sh's own header for what M31_ROOT/LANGC need to point at.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- see build.sh's own header comment." >&2
@@ -38,7 +38,7 @@ fi
 
 "$LANGC" --emit-c "main.$LANG_EXT" -o "$W/httpserver.c" || exit 1
 "$CC" "$OPT" -ffp-contract=off -Wall -Wextra -Werror -I "$M31_ROOT/runtime" -pthread \
-      -o "$OUT" "$W/httpserver.c" greenthread_probe.c \
+      -o "$OUT" "$W/httpserver.c" bench/greenthread_probe.c \
       "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" \
       "$M31_ROOT/$RT_REACTOR_C" "$M31_ROOT/$RT_CTX_ASM" || exit 1
 echo "built $OUT"

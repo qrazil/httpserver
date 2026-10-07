@@ -9,7 +9,7 @@
 # See build.sh's own header for what M31_ROOT (and LANGC, if the compiler
 # isn't at $M31_ROOT's own default) need to point at.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 WORK=$(mktemp -d)
 pass=0
@@ -26,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! bash build.sh >"$WORK/build.log" 2>&1; then
+if ! bash scripts/build.sh >"$WORK/build.log" 2>&1; then
     bad "build" "$(cat "$WORK/build.log")"
     exit 1
 fi

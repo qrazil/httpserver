@@ -5,7 +5,7 @@ levels (1/10/50/100)." This document asks a different question, the one
 this project's own stated target (docs/concurrency-decision.md: "millions
 of green threads, not tens of thousands") is actually about: **how far does
 concurrency go before something degrades or breaks**, for the same two
-servers (`apps/httpserver`, `apps/httpserver/goserver`), by ramping
+servers (`httpserver`, `bench/goserver`), by ramping
 concurrent connections up -- 100, 250, 500, 1000, 2500, 5000, 10000, 20000
 -- and watching requests/sec, latency, success rate, server memory and
 (for m31) the concurrently-live green-thread count at each step.
@@ -56,7 +56,7 @@ bullet has been corrected in place rather than deleted.
   client-side ephemeral ports in use at once. At `c=20000` that is ~71% of
   the entire range. See "Why the ramp stopped at 20,000" below.
 - `somaxconn` (`/proc/sys/net/core/somaxconn`): **4096**.
-- **A pre-existing asymmetry worth flagging**: `apps/httpserver/main.m31`
+- **A pre-existing asymmetry worth flagging**: `main.m31`
   calls `net.listen(host, port)` with no explicit `backlog`, so it gets
   `lib/net.m31`'s own default of **128** pending connections
   (`pub Result<Listener, Error> listen(str host, int port, int backlog =
@@ -87,7 +87,7 @@ bullet has been corrected in place rather than deleted.
 
 ### Instrumentation added for this test (nothing existing was modified)
 
-`apps/httpserver/greenthread_probe.c` is a new, small, purely additive C
+`bench/greenthread_probe.c` is a new, small, purely additive C
 file: a `SIGUSR1` handler that reads the concurrently-live green-thread
 count. It does **not** touch `runtime/scheduler.c` or `runtime/rt.c` --
 those files already export three plain functions for exactly this kind of
@@ -100,16 +100,16 @@ header). `live = spawned - completed` at the instant of the signal. Output
 goes to `stderr` via a hand-rolled integer formatter and `write(2)` (not
 `snprintf`, which is not async-signal-safe).
 
-`apps/httpserver/build_scaling.sh` builds this into a separate binary,
-`apps/httpserver/httpserver_scaling`, alongside the probe file. It does not
-touch `apps/httpserver/build.sh` or the shipped `apps/httpserver/httpserver`
+`scripts/build_scaling.sh` builds this into a separate binary,
+`httpserver_scaling`, alongside the probe file. It does not
+touch `scripts/build.sh` or the shipped `httpserver`
 binary `BENCHMARK.md` measured -- this test uses `httpserver_scaling`
 throughout (both for throughput numbers and for the probe samples), so all
 of *this* document's own numbers come from one consistent binary.
 
 ```
-bash apps/httpserver/build_scaling.sh                       # ./httpserver_scaling
-(cd apps/httpserver/goserver && go build -o goserver main.go)
+bash scripts/build_scaling.sh                       # ./httpserver_scaling
+(cd bench/goserver && go build -o goserver main.go)
 
 kill -USR1 <httpserver_scaling's pid>   # prints, to its stderr:
 #   [greenthread-probe] carriers=12 spawned=183042 completed=182998 live=44
@@ -143,11 +143,11 @@ server's own point of view); for m31 only, a `SIGUSR1` sent to the server
 at the same mid-run moment, sampling the live green-thread count directly.
 `hey`'s own summary (`Requests/sec`, `p50/p90/p99`, status-code and error
 distributions) is parsed from its text output, saved in full under
-`apps/httpserver/scaling_raw/<server>_c<N>.txt`.
+`bench/scaling_raw/<server>_c<N>.txt`.
 
 Full orchestration script, raw `hey` output for all 16 base runs plus the
 20,000 level and the 10,000 rerun, and `summary.csv` (everything below, as
-data) are all in `apps/httpserver/scaling_raw/`.
+data) are all in `bench/scaling_raw/`.
 
 ## Results
 
@@ -225,7 +225,7 @@ throughput and tail latency from 5,000 upward, and in resident memory by
 
 **This is not `BENCHMARK.md`'s already-documented timeout/carrier-ceiling
 bug.** That bug needs `set_read_timeout`/`set_write_timeout` to be set (it
-is not, here -- confirmed in `apps/httpserver/main.m31`), and it has a
+is not, here -- confirmed in `main.m31`), and it has a
 specific signature: a *cliff* at exactly `n_carriers` simultaneously-idle
 connections, with `context deadline exceeded` errors. What this test
 observed instead is a *smooth, monotonically worsening* gap as concurrency
@@ -386,8 +386,7 @@ rather than only inferring it from open connections. `runtime/scheduler.c`
 already exports `rt_sched_spawned`/`rt_sched_completed` (the same two
 counters `rt_run_program`'s own quiescence loop uses) and
 `rt_sched_ncarriers`; `runtime/rt.c` already exports (non-`static`, just
-not in its header) `rt_global_scheduler`. `apps/httpserver/
-greenthread_probe.c`, described above, wires a `SIGUSR1` handler to read
+not in its header) `rt_global_scheduler`. `greenthread_probe.c`, described above, wires a `SIGUSR1` handler to read
 `live = spawned - completed` from a running process, with no changes to
 either of those runtime files.
 
@@ -398,7 +397,7 @@ count (`ss -tn state established`) closely at every level -- e.g. at
 `c=20000`: 19,030 vs 18,639 (sampled ~0.3s apart, so not expected to match
 to the connection, but same order and same trend). This is a **direct**
 confirmation (not just an inference from connection counts) that
-`apps/httpserver`'s one-green-thread-per-accepted-connection design
+`httpserver`'s one-green-thread-per-accepted-connection design
 (`main.m31`'s `accept_loop`/`spawn handle_conn(c)`) is doing exactly what
 it says at real scale: 19,030 simultaneously live green threads was
 observed directly, with the process still answering requests (if slowly)
@@ -469,7 +468,7 @@ server broke at or before it.
   `httpserver_scaling` binary (`build_scaling.sh`); it calls three
   pre-existing, already-exported runtime functions and modifies neither
   `runtime/scheduler.c` nor `runtime/rt.c`. The shipped
-  `apps/httpserver/httpserver` binary and `build.sh` used for
+  `httpserver` binary and `scripts/build.sh` used for
   `BENCHMARK.md` are untouched by this test.
 - The root-cause section is a code-reading hypothesis, explicitly not
   profiler-confirmed -- see its own closing paragraph.
@@ -477,9 +476,9 @@ server broke at or before it.
 ## Reproducing this
 
 ```
-cd apps/httpserver
-bash build_scaling.sh                                   # ./httpserver_scaling (adds the SIGUSR1 probe)
-(cd goserver && go build -o goserver main.go)            # ./goserver
+# from the repository root
+bash scripts/build_scaling.sh                                   # ./httpserver_scaling (adds the SIGUSR1 probe)
+(cd bench/goserver && go build -o goserver main.go)            # ./goserver
 
 ./httpserver_scaling --port 19001 --host 127.0.0.1 &
 SPID=$!
@@ -487,7 +486,7 @@ hey -z 10s -c <100|250|500|1000|2500|5000|10000|20000> -t 20 http://127.0.0.1:19
 kill -USR1 $SPID        # prints live green-thread count to the server's stderr
 kill $SPID
 
-./goserver --port 19009 --host 127.0.0.1 &
+./bench/goserver/goserver --port 19009 --host 127.0.0.1 &
 hey -z 10s -c <same level> -t 20 http://127.0.0.1:19009/
 kill %1
 ```
@@ -497,4 +496,4 @@ Full orchestration (`ramp.sh`'s shape: fresh port and process per run,
 mid-run, `SIGUSR1` sent to m31 at the same moment), all 16 base runs plus
 the 20,000 level and the 10,000 rerun's raw `hey` output and server logs,
 and the full `summary.csv` behind every number in this document, are in
-`apps/httpserver/scaling_raw/`.
+`bench/scaling_raw/`.

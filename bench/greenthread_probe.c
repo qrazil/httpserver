@@ -1,5 +1,5 @@
 /* greenthread_probe.c -- a purely additive, read-only instrumentation file
- * for the green-thread scaling test (apps/httpserver/SCALING.md) and the
+ * for the green-thread scaling test (bench/SCALING.md) and the
  * fuel_size/wake-permutation investigation (the non-monotonic throughput
  * dip found past c=500 or so in that document's "Follow-up" sections). It
  * does NOT modify runtime/scheduler.c or runtime/rt.c in any way; it only

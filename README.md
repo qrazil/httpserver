@@ -9,8 +9,8 @@ the same fixed reply: `200 OK`, `Content-Type: text/plain; charset=utf-8`,
 a correct `Content-Length`, body `Hello, World!\n`.
 
     cargo build                        # the compiler
-    bash apps/httpserver/build.sh      # ./apps/httpserver/httpserver
-    bash apps/httpserver/test.sh       # the tests
+    bash scripts/build.sh      # ./httpserver
+    bash scripts/test.sh       # the tests
 
     httpserver                         listen on 0.0.0.0:8080
     httpserver --port 9000             listen on 0.0.0.0:9000
@@ -68,7 +68,7 @@ is exactly what `BENCHMARK.md` recommends as follow-up work.
 
 ## Testing
 
-`bash apps/httpserver/test.sh` builds the server, starts it on a scratch
+`bash scripts/test.sh` builds the server, starts it on a scratch
 port, and checks, against the real built binary over a real socket (no
 mocking):
 
@@ -89,7 +89,7 @@ mocking):
 `BENCHMARK.md` is the throughput/latency comparison against an equivalent Go
 `net/http` server, with methodology, raw numbers and honest caveats; it is
 exploratory measurement, not part of this test suite, and not part of the
-ordinary corpus (`apps/httpserver` is a long-running server, not a short
+ordinary corpus (`httpserver` is a long-running server, not a short
 pass/fail program, so `gates.sh` does not build or run it). `SCALING.md` is
 the complementary question -- not "how fast at a few fixed concurrency
 levels" but "how far does concurrency go before something degrades or
