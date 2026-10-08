@@ -59,15 +59,15 @@ http.Response hello(http.Request req) {
 }
 
 // One accepted connection, on its own green thread, to its end.
-void handle_conn(net.Conn c) {
+void handle_conn(net.Conn conn) {
     // `serve_conn` already answers a malformed request and closes on its
     // own; a transport-level `Err` here (socket gone, peer reset) is not
     // this server's failure either -- one connection's end is not the
     // server's (same reasoning `http.serve`'s own doc comment gives).
-    match (http.serve_conn(c, hello)) {
+    match (http.serve_conn(conn, hello)) {
         case Ok(int served): {
         }
-        case Err(http.Error e): {
+        case Err(http.Error error): {
         }
     }
 }
@@ -75,14 +75,14 @@ void handle_conn(net.Conn c) {
 // Accept forever, one `spawn` per connection -- the whole point of tonight's
 // fix: a slow or slow-reading client on one green thread never blocks
 // another connection's green thread, because neither blocks the carrier.
-void accept_loop(net.Listener ln) {
+void accept_loop(net.Listener listener) {
     while (true) {
-        match (ln.accept()) {
-            case Ok(net.Conn c): {
-                spawn handle_conn(c);
+        match (listener.accept()) {
+            case Ok(net.Conn conn): {
+                spawn handle_conn(conn);
             }
-            case Err(net.Error e): {
-                trap("accept: " + e.to_str());
+            case Err(net.Error error): {
+                trap("accept: " + error.to_str());
             }
         }
     }
@@ -101,15 +101,15 @@ cli.integer("backlog", help: "listen backlog (see lib/net.m31's own doc comment 
 List<str> argv = os.args();
 argv.remove_at(0);
 match (cli.parse(argv)) {
-    case Err(args.UsageError e): {
-        io.eprint("httpserver: " + e.to_str());
+    case Err(args.UsageError error): {
+        io.eprint("httpserver: " + error.to_str());
         io.eprint(cli.usage());
         os.exit(2);
     }
     case Ok(args.Parsed parsed): {
         match (parsed.help()) {
-            case Some(str h): {
-                print(h);
+            case Some(str help_text): {
+                print(help_text);
             }
             case None: {
                 str host = parsed.value("host").or("0.0.0.0");
@@ -128,7 +128,7 @@ match (cli.parse(argv)) {
                     os.exit(2);
                 }
                 match (net.listen(host, port, backlog: backlog)) {
-                    case Ok(net.Listener ln): {
+                    case Ok(net.Listener listener): {
                         // The requested value, not an attempt to read back
                         // what the OS actually settled on (no portable way
                         // to ask a listening socket its own effective
@@ -136,11 +136,11 @@ match (cli.parse(argv)) {
                         // own default comment explains: usually a stand-in
                         // for "whatever this host's real ceiling is", not a
                         // guarantee this host granted it in full.
-                        print("httpserver: listening on " + host + ":" + ln.local().port().to_str() + " (backlog " + backlog.to_str() + ")");
-                        accept_loop(ln);
+                        print("httpserver: listening on " + host + ":" + listener.local().port().to_str() + " (backlog " + backlog.to_str() + ")");
+                        accept_loop(listener);
                     }
-                    case Err(net.Error e): {
-                        io.eprint("httpserver: listen " + host + ":" + port.to_str() + ": " + e.to_str());
+                    case Err(net.Error error): {
+                        io.eprint("httpserver: listen " + host + ":" + port.to_str() + ": " + error.to_str());
                         os.exit(1);
                     }
                 }
