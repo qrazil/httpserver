@@ -15,7 +15,7 @@ name: Test
 # this is a manual step, not automatic, and the tradeoffs of the
 # alternatives (tracking `latest`, or a cross-repo bump-PR bot).
 env:
-  M31_REF: v0.2.0
+  M31_REF: v0.3.0
 
 on:
   push:
