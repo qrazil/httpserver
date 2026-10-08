@@ -18,7 +18,7 @@
 // §3.4 ("No captures"), one static, immortal instance per (function,
 // interface) pair -- free across threads, nothing to move or clone. So this
 // program writes its own accept loop (the same shape as
-// `runtime/net_concurrency_demo/main.m31`), `spawn`ing `handle_conn` per
+// `runtime/net_concurrency_demo/main.m31`), `spawn`ing `handle_connection` per
 // accepted connection and calling the public `http.serve_conn` inside it.
 import args;
 import http;
@@ -54,17 +54,17 @@ import os;
 // green thread, gets the same fixed reply.
 const str BODY = "Hello, World!\n";
 
-http.Response hello(http.Request req) {
+http.Response hello(http.Request request) {
     return http.text_response(BODY);
 }
 
 // One accepted connection, on its own green thread, to its end.
-void handle_conn(net.Conn conn) {
+void handle_connection(net.Conn connection) {
     // `serve_conn` already answers a malformed request and closes on its
     // own; a transport-level `Err` here (socket gone, peer reset) is not
     // this server's failure either -- one connection's end is not the
     // server's (same reasoning `http.serve`'s own doc comment gives).
-    match (http.serve_conn(conn, hello)) {
+    match (http.serve_conn(connection, hello)) {
         case Ok(int served): {
         }
         case Err(http.Error error): {
@@ -78,8 +78,8 @@ void handle_conn(net.Conn conn) {
 void accept_loop(net.Listener listener) {
     while (true) {
         match (listener.accept()) {
-            case Ok(net.Conn conn): {
-                spawn handle_conn(conn);
+            case Ok(net.Conn connection): {
+                spawn handle_connection(connection);
             }
             case Err(net.Error error): {
                 trap("accept: " + error.to_str());
