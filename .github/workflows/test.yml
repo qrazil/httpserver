@@ -89,6 +89,12 @@ jobs:
           echo "LANGC=$RUNNER_TEMP/m31/m31c" >> "$GITHUB_ENV"
           echo "M31_ROOT=$RUNNER_TEMP/m31" >> "$GITHUB_ENV"
 
+      - name: Use OpenSSL 3 (macOS ships LibreSSL, whose x509 output the https tests reject)
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+
       - name: Check formatting
         run: '"$LANGC" fmt --check -r .'
 
