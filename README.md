@@ -15,6 +15,8 @@ a correct `Content-Length`, body `Hello, World!\n`.
     httpserver                         listen on 0.0.0.0:8080
     httpserver --port 9000             listen on 0.0.0.0:9000
     httpserver --host 127.0.0.1        listen on a specific address only
+    httpserver --tls-cert chain.pem --tls-key key.pem
+                                       serve https instead of http
     httpserver --help
 
 Port and host are command-line flags, not environment variables: this
@@ -22,6 +24,77 @@ language's standard library has no `getenv` exposed to a `.m31` program
 today (`prim`s cover sockets, files and the clock, not the process
 environment), and `lib/args` already gives a `--port`/`--host` pair the usual
 shell idioms (`httpserver --port "${PORT:-8080}"`) work with anyway.
+
+## Serving https
+
+    httpserver --tls-cert chain.pem --tls-key key.pem --port 8443
+
+`--tls-cert` is a **PEM** certificate chain, leaf first (intermediates after
+it; the root is optional); `--tls-key` is the PEM private key of that leaf,
+**Ed25519 or ECDSA P-256** (PKCS#8 or SEC1). The two go together: giving one
+without the other is a usage error (exit 2). Without them nothing changes --
+the listener speaks plain HTTP exactly as before. One port speaks one or the
+other, never both. DER files, RSA keys, encrypted keys, ALPN beyond
+`http/1.1`, client certificates, session resumption and 0-RTT are not
+supported (`lib/tlsserver.m31` documents the full list; it serves TLS 1.3
+with `TLS_CHACHA20_POLY1305_SHA256` and x25519 only).
+
+The pair is loaded and checked **before the port is opened**: an unreadable
+file, a chain that is not PEM, a key that is encrypted, of an unsupported
+kind, or not the one the first certificate certifies makes the server print
+one line naming the two files and the reason, and exit 1. That line never
+contains a byte of either file; neither does anything else this server
+prints (`tlsserver.ConfigError` is payload-free by contract, and the test
+suite greps every server output for the key's body lines).
+
+After the handshake a connection is served by the same code as a plain one:
+the same handler, keep-alive, the `http.MAX_REQUESTS` cap per connection, the
+same refusal (and the same 400/431 answers) for a malformed or oversized
+request, and no read or write timeout on an established connection.
+`http.serve_conn` takes a `net.Conn`, not an `io.Stream`, so `main.m31` carries
+that loop (`serve_stream`) as a small copy built from the same public pieces
+(`read_request`, `write_response`, `should_keep_alive`); the tests compare its
+answers with the plain path's.
+
+### Handshakes cannot stall the server
+
+The handshake is the one point where a peer makes this server wait before it
+has said a word, so it is handled apart from everything else:
+
+- The accept loop does nothing but hand each new connection to a bounded pool
+  of **handshake workers** (`--tls-handshake-workers`, default 4) through a
+  channel, so a slow handshake can never stop `accept`. A finished handshake
+  moves to a green thread of its own, exactly like a plain connection, and
+  the worker takes the next one.
+- Each read of a handshake has a timeout (`--tls-handshake-timeout-ms`,
+  default 5000, at least 1 -- never "wait forever"). A client that connects
+  and sends nothing, or stops halfway through, loses its socket when it
+  fires; a garbage or truncated hello, a TLS 1.2-only client and a plain
+  HTTP request on the https port are answered with an alert (or just closed)
+  and forgotten. Nothing a handshake does can end the process or touch
+  another connection.
+- A bounded wait is a `poll(2)` that occupies a carrier OS thread (see
+  "A note on read/write timeouts"), so the pool size is the **most carriers
+  stalled handshakes can occupy**. Keep `--tls-handshake-workers` below the
+  carrier count (`nproc`, or `LANG_NUM_CARRIERS` if set -- the server warns
+  when it can see that the pool is not below it) and established connections
+  keep being served however many handshakes are stalled.
+- The cost of that bound is the second thing to know: silent connections
+  queue for the workers, so *k* of them delay a legitimate client by up to
+  about *k* x timeout / workers (8 silent clients on 2 workers with a 0.7 s
+  timeout delay a good client by under 3 s in the tests). Up to 256
+  connections wait for a worker; past that the accept loop waits and the
+  kernel's listen backlog takes over. The timeout bounds each *read*, not the
+  whole handshake (`lib/tlsserver.m31`, "Denial of service"), so a peer that
+  drips a byte per timeout can hold a worker much longer. Rate-limit in
+  front of this server if hostile clients matter; this is a stdlib limit,
+  not something `main.m31` can tighten with the primitives there are.
+
+Each worker loads its own copy of the chain and key from the files: a
+`tlsserver.Config` holds refcounted objects and refcounts are not atomic, so
+one cannot be shared between green threads.
+
+Other flags: `--tls-handshake-timeout-ms MS`, `--tls-handshake-workers N`.
 
 ## Why this is not just `http.serve(ln, hello)`
 
@@ -85,6 +158,24 @@ mocking):
    not serialize on one carrier).
 5. `--help`, a bad flag, and a bad `--port` are refused the way `lib/args`
    refuses them.
+6. **https** (needs `openssl` and `python3`; the curl checks need `curl`).
+   A throwaway CA, an Ed25519 leaf and a P-256 leaf are made with `openssl`;
+   the clients are `curl --cacert`, the standard library's own `https`
+   client with a custom `tls.Trust.CaFile` (`scripts/https_client.m31`; it
+   cannot verify an Ed25519 certificate, so it talks to the P-256 server),
+   and Python's `ssl`. Covered: a valid request, keep-alive (curl reuses one
+   connection; five requests and then `Connection: close` over Python's),
+   the CA being required, the limits (a 9000-byte header line, a malformed
+   request, 1000 requests per connection) giving the same answers as plain
+   HTTP, random bytes / zeros / plain HTTP / a truncated hello / an alert
+   record / a huge record length / a TLS 1.2-only client on the https port
+   with the server still serving afterwards, a client that connects and
+   sends nothing and one that stops mid-record (both closed within the
+   timeout, a good client unaffected, then eight silent clients on two
+   workers), and startup refusal of a key that is not the certificate's, an
+   RSA key, an encrypted key, a garbage key, a DER or missing certificate,
+   one flag without the other, and a zero timeout or worker count -- with
+   every refusal and every server output checked for key material.
 
 `BENCHMARK.md` is the throughput/latency comparison against an equivalent Go
 `net/http` server, with methodology, raw numbers and honest caveats; it is

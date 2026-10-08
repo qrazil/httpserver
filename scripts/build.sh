@@ -3,6 +3,7 @@
 #
 #   M31_ROOT=/path/to/m31 bash build.sh          -O2, warnings are errors
 #   M31_ROOT=/path/to/m31 CC=clang bash build.sh
+#   SRC=other.m31 OUT=other bash build.sh         any other one-file program
 #
 # This app is one `.m31` file, compiled by the m31 compiler (m31c) and then
 # linked, as ordinary C, against the m31 RUNTIME's own source files
@@ -43,6 +44,7 @@ LANGC=${LANGC:-./m31c}
 CC=${CC:-gcc}
 OPT=${OPT:--O2}
 OUT=${OUT:-httpserver}
+SRC=${SRC:-main.$LANG_EXT}
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
@@ -51,7 +53,7 @@ if [ ! -x "$LANGC" ]; then
     exit 1
 fi
 
-"$LANGC" --emit-c "main.$LANG_EXT" -o "$W/httpserver.c" || exit 1
+"$LANGC" --emit-c "$SRC" -o "$W/httpserver.c" || exit 1
 # RT_REACTOR_C/RT_CTX_ASM (from runtime/arch.sh above) are paths relative to
 # M31_ROOT, not to this script's own directory -- prefix them before use.
 # The same flags this project's own run.sh holds the corpus to: the emitted

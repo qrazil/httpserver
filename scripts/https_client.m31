@@ -1,0 +1,28 @@
+// A test client for scripts/test.sh: one https GET through the standard
+// library's own client, trusting only the CA file it is given.
+//
+//   https_client URL CA_FILE
+//
+// Prints `status N` and `body SIZE` and exits 0, or prints `error SENTENCE`
+// and exits 1 (a certificate the CA did not sign, a failed handshake, ...).
+import http;
+import https;
+import io;
+import os;
+import tls;
+
+List<str> arguments = os.args();
+if (arguments.size() != 3) {
+    io.eprint("usage: https_client URL CA_FILE");
+    os.exit(2);
+}
+match (https.get(arguments[1], trust: tls.Trust.CaFile(arguments[2]))) {
+    case Ok(http.Response response): {
+        print("status " + response.status().to_str());
+        print("body " + response.body().size().to_str());
+    }
+    case Err(http.Error error): {
+        print("error " + error.to_str());
+        os.exit(1);
+    }
+}
