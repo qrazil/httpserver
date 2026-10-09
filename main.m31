@@ -26,31 +26,19 @@ import http;
 import net;
 import io;
 import os;
+import timer;
 import tlsserver;
 
-// **Deliberately no `set_read_timeout`/`set_write_timeout` here** -- see
-// apps/httpserver/BENCHMARK.md, "A second finding: timeouts and the carrier
-// ceiling", for the full account, but in short: `lib/net.m31`'s own doc
-// comment says a *bounded* read/write wait (any nonzero timeout) is
-// implemented with `__poll`, a real blocking syscall on the calling
-// carrier's own OS thread, because a non-blocking socket's kernel timeout
-// stopped working once Phase 3.5 made sockets non-blocking. An *unbounded*
-// wait (`read_timeout_ms == 0`, the default) goes through `__wait_io`
-// instead, which parks the green thread on the reactor and frees its
-// carrier immediately. The difference is invisible with a handful of
-// connections, and severe with more: this server, under real concurrent
-// `hey` load with a 30s read timeout set on every connection (the same
-// default `http.serve`'s own `deadline()` would set), reliably stalls
-// requests for seconds once concurrently open keep-alive connections pass
-// the carrier count (`nproc`, by default) -- every carrier ends up parked
-// inside its own `poll(2)` call waiting on one connection's next byte, and
-// none is left free to run anybody else's green thread, including the
-// accept loop's. Leaving the timeout at its default (wait forever,
-// cooperatively) is what makes the concurrency numbers in BENCHMARK.md
-// real; it also means a client that opens a connection and never sends
-// anything ties up a green thread (cheap: ~8 KB of stack, not an OS thread)
-// until it disconnects -- an acceptable trade for a benchmark server, and
-// exactly the trade-off this file's own README spells out.
+// **Deliberately no `set_read_timeout`/`set_write_timeout` on an established
+// connection.** A client that opens a connection and never sends anything
+// ties up one green thread (~8 KB of stack, not an OS thread) until it
+// disconnects; that is the trade this server's README spells out. It is no
+// longer a carrier problem: `lib/net.m31`'s timeouts now park only the green
+// thread that waits, so neither a bounded nor an unbounded wait ever holds a
+// carrier (the older `poll(2)`-on-the-carrier behavior that
+// bench/BENCHMARK.md, "A second finding", measured is gone from the
+// standard library). A deployment that wants idle connections reaped can add
+// the timeout without that cost.
 
 // The whole application. Every request, from every connection, on every
 // green thread, gets the same fixed reply.
@@ -74,6 +62,22 @@ void handle_connection(net.Conn connection) {
     }
 }
 
+// The pause after a transient accept error: `http.serve`'s own (10 ms), and
+// it parks this green thread only.
+const int ACCEPT_BACKOFF_MS = 10;
+
+// A failed accept. The weather (out of descriptors, a client that gave up in
+// the backlog) is not the server's failure: pause and ask again, as
+// `http.serve` does. An out-of-descriptors accept leaves the connection
+// queued, so asking at once would spin. Anything else means the listener is
+// no good, and that ends the process.
+void refuse_or_back_off(net.Error error) {
+    if (!error.is_transient()) {
+        trap("accept: " + error.to_str());
+    }
+    timer.sleep_ms(ACCEPT_BACKOFF_MS);
+}
+
 // Accept forever, one `spawn` per connection -- the whole point of tonight's
 // fix: a slow or slow-reading client on one green thread never blocks
 // another connection's green thread, because neither blocks the carrier.
@@ -84,7 +88,7 @@ void accept_loop(net.Listener listener) {
                 spawn handle_connection(connection);
             }
             case Err(net.Error error): {
-                trap("accept: " + error.to_str());
+                refuse_or_back_off(error);
             }
         }
     }
@@ -106,14 +110,14 @@ void accept_loop(net.Listener listener) {
 //     `--tls-handshake-workers` handshake workers (a channel), so a stalled
 //     handshake can never stop `accept`.
 //   - `tlsserver.accept` is given `--tls-handshake-timeout-ms` (default
-//     10 s) for each read of the handshake, so a client that connects and
-//     sends nothing, or stalls mid-handshake, frees its worker and its
-//     socket when the timeout fires. That bounded wait is the `poll(2)` kind
-//     (see "A note on read/write timeouts" in the README): it occupies a
-//     carrier OS thread while it waits. The pool size is therefore the most
-//     carriers handshakes can ever occupy at once; keep it below the
-//     carrier count (`nproc`, or `LANG_NUM_CARRIERS`) and established
-//     connections keep running however many handshakes are stalled.
+//     5 s) for each read of the handshake, and its own default 30 s
+//     deadline for the whole handshake, so a client that connects and
+//     sends nothing, stalls mid-handshake, or drips a byte at a time frees
+//     its worker and its socket when the limit fires. Those waits park the
+//     worker's green thread only, never a carrier, so established
+//     connections keep running however many handshakes are stalled and the
+//     pool size is just how many handshakes (one signature each) run at
+//     once.
 //   - A finished handshake is moved to its own green thread, exactly like a
 //     plain connection, and the worker goes back to the channel.
 //
@@ -130,125 +134,9 @@ void accept_loop(net.Listener listener) {
 // the accept loop waits, and the kernel's listen backlog takes over.
 const int HANDSHAKE_QUEUE = 256;
 
-// `http.serve_conn` takes a `net.Conn`, not an `io.Stream`, so a TLS
-// connection cannot be handed to it. This is its loop, over the public
-// pieces `serve_conn` itself is made of (`read_request`, `write_response`,
-// `should_keep_alive`, `MAX_REQUESTS`), with `serve_conn`'s refusal rule: a
-// malformed request is answered and the connection closed; a transport
-// failure is not answered, there being nothing to answer it on.
-Result<int, http.Error> serve_stream(io.Stream stream, http.Handler handler) {
-    int served = 0;
-    while (served < http.MAX_REQUESTS) {
-        match (http.read_request(stream)) {
-            case Ok(Option<http.Request> maybe): {
-                match (maybe) {
-                    case None: {
-                        return Result<int, http.Error>.Ok(served);
-                    }
-                    case Some(http.Request request): {
-                        http.Response response = handler.handle(request);
-                        bool will_continue = http.should_keep_alive(request, response) && served + 1 < http.MAX_REQUESTS;
-                        http.write_response(stream, request, response, will_continue)?;
-                        served = served + 1;
-                        if (!will_continue) {
-                            return Result<int, http.Error>.Ok(served);
-                        }
-                    }
-                }
-            }
-            case Err(http.Error error): {
-                if (is_answered(error)) {
-                    answer_refusal(stream, error);
-                }
-                return Result<int, http.Error>.Ok(served);
-            }
-        }
-    }
-    return Result<int, http.Error>.Ok(served);
-}
-
-// Which read failures get a status line back: the peer's malformed or
-// oversized message (and `Other`), the same set `http.serve_conn` answers.
-bool is_answered(http.Error error) {
-    match (error) {
-        case Syntax: {
-            return true;
-        }
-        case Framing: {
-            return true;
-        }
-        case TooLarge: {
-            return true;
-        }
-        case BadUrl: {
-            return true;
-        }
-        case Other: {
-            return true;
-        }
-        case Closed: {
-            return false;
-        }
-        case Refused: {
-            return false;
-        }
-        case TimedOut: {
-            return false;
-        }
-        case Unreachable: {
-            return false;
-        }
-        case Reset: {
-            return false;
-        }
-        case InUse: {
-            return false;
-        }
-        case NameNotFound: {
-            return false;
-        }
-        case CertificateUntrusted: {
-            return false;
-        }
-        case CertificateExpired: {
-            return false;
-        }
-        case HostnameMismatch: {
-            return false;
-        }
-        case TlsFailed: {
-            return false;
-        }
-        case InsecureRedirect: {
-            return false;
-        }
-        case SchemeNeedsTls: {
-            return false;
-        }
-    }
-}
-
-// The last thing written on a connection whose framing is no longer
-// trusted: `Connection: close` and the error's sentence, best effort.
-void answer_refusal(io.Stream stream, http.Error error) {
-    match (http.request("GET", "http://localhost/")) {
-        case Ok(http.Request bare): {
-            http.Response response = http.text_response(error.to_str() + "\n", status: error.status());
-            match (http.write_response(stream, bare, response, false)) {
-                case Ok: {
-                }
-                case Err: {
-                }
-            }
-        }
-        case Err(http.Error request_error): {
-        }
-    }
-}
-
 // One finished TLS handshake, on its own green thread, to its end.
 void handle_secure_connection(tlsserver.Conn secure) {
-    match (serve_stream(secure, hello)) {
+    match (http.serve_stream(secure, hello)) {
         case Ok(int served): {
         }
         case Err(http.Error error): {
@@ -317,29 +205,8 @@ void serve_tls(net.Listener listener, str chain_path, str key_path, int workers,
                 send(pending, connection);
             }
             case Err(net.Error error): {
-                trap("accept: " + error.to_str());
+                refuse_or_back_off(error);
             }
-        }
-    }
-}
-
-// Warn when the handshake pool could occupy every carrier. Only knowable
-// when `LANG_NUM_CARRIERS` is set; otherwise the default is `nproc`, which
-// a program here cannot ask for.
-void warn_if_workers_fill_carriers(int workers) {
-    match (os.env("LANG_NUM_CARRIERS")) {
-        case Some(str text): {
-            match (text.parse_int()) {
-                case Some(int carriers): {
-                    if (workers >= carriers) {
-                        io.eprint("httpserver: warning: --tls-handshake-workers " + workers.to_str() + " is not below LANG_NUM_CARRIERS " + carriers.to_str() + "; stalled handshakes can occupy every carrier");
-                    }
-                }
-                case None: {
-                }
-            }
-        }
-        case None: {
         }
     }
 }
@@ -356,7 +223,7 @@ cli.integer("port", help: "port to listen on", placeholder: "PORT", default: "80
 cli.value("tls-cert", help: "serve https: PEM certificate chain, leaf first (needs --tls-key)", placeholder: "FILE");
 cli.value("tls-key", help: "serve https: PEM private key of the leaf, Ed25519 or ECDSA P-256 (needs --tls-cert)", placeholder: "FILE");
 cli.integer("tls-handshake-timeout-ms", help: "https: give up on a handshake read after this long", placeholder: "MS", default: "5000");
-cli.integer("tls-handshake-workers", help: "https: handshakes in flight at once; keep below the carrier count (nproc)", placeholder: "N", default: "4");
+cli.integer("tls-handshake-workers", help: "https: handshakes in flight at once", placeholder: "N", default: "4");
 cli.integer("backlog", help: "listen backlog (see lib/net.m31's own doc comment on `listen`)", placeholder: "N", default: "65535");
 List<str> argv = os.args();
 argv.remove_at(0);
@@ -407,7 +274,6 @@ match (cli.parse(argv)) {
                 // Refuse an unusable certificate/key pair before the port
                 // is opened.
                 if (is_tls) {
-                    warn_if_workers_fill_carriers(handshake_workers);
                     check_tls_config(chain_path, key_path);
                 }
                 match (net.listen(host, port, backlog: backlog)) {

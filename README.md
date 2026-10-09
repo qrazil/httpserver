@@ -31,12 +31,16 @@ shell idioms (`httpserver --port "${PORT:-8080}"`) work with anyway.
 
 `--tls-cert` is a **PEM** certificate chain, leaf first (intermediates after
 it; the root is optional); `--tls-key` is the PEM private key of that leaf,
-**Ed25519 or ECDSA P-256** (PKCS#8 or SEC1). The two go together: giving one
+**Ed25519 or ECDSA P-256** (PKCS#8, or SEC1 for P-256). Each file may also be
+**DER**, told apart from PEM by content: the certificate file as one or more
+certificates laid end to end, the key file as PKCS#8 or SEC1; the two files
+need not be in the same form. The two go together: giving one
 without the other is a usage error (exit 2). Without them nothing changes --
 the listener speaks plain HTTP exactly as before. One port speaks one or the
-other, never both. DER files, RSA keys, encrypted keys, ALPN beyond
-`http/1.1`, client certificates, session resumption and 0-RTT are not
-supported (`lib/tlsserver.m31` documents the full list; it serves TLS 1.3
+other, never both. RSA keys, encrypted keys, ALPN beyond `http/1.1`,
+client certificates (the server never asks for one, so an Ed25519 client
+certificate is not something it can be tested with), session resumption and
+0-RTT are not supported (`lib/tlsserver.m31` documents the full list; it serves TLS 1.3
 with `TLS_CHACHA20_POLY1305_SHA256` and x25519 only).
 
 The pair is loaded and checked **before the port is opened**: an unreadable
@@ -51,10 +55,15 @@ After the handshake a connection is served by the same code as a plain one:
 the same handler, keep-alive, the `http.MAX_REQUESTS` cap per connection, the
 same refusal (and the same 400/431 answers) for a malformed or oversized
 request, and no read or write timeout on an established connection.
-`http.serve_conn` takes a `net.Conn`, not an `io.Stream`, so `main.m31` carries
-that loop (`serve_stream`) as a small copy built from the same public pieces
-(`read_request`, `write_response`, `should_keep_alive`); the tests compare its
-answers with the plain path's.
+Both go through `http.serve_stream`, which takes any `io.Stream`
+(`http.serve_conn` is its `net.Conn` wrapper), so a TLS connection is served
+by the very loop the plain path uses; the tests compare the two paths'
+answers.
+
+A failed `accept` is handled the way `http.serve` handles it: if
+`error.is_transient()` (out of descriptors, a client that gave up in the
+backlog) the loop pauses 10 ms and accepts again; anything else means the
+listener is no good and the server stops with a message.
 
 ### Handshakes cannot stall the server
 
@@ -67,26 +76,30 @@ has said a word, so it is handled apart from everything else:
   moves to a green thread of its own, exactly like a plain connection, and
   the worker takes the next one.
 - Each read of a handshake has a timeout (`--tls-handshake-timeout-ms`,
-  default 5000, at least 1 -- never "wait forever"). A client that connects
-  and sends nothing, or stops halfway through, loses its socket when it
+  default 5000, at least 1 -- never "wait forever"), and the whole handshake
+  has `tlsserver.accept`'s default 30 s deadline. A client that connects
+  and sends nothing, or stops halfway through, loses its socket when one
   fires; a garbage or truncated hello, a TLS 1.2-only client and a plain
   HTTP request on the https port are answered with an alert (or just closed)
   and forgotten. Nothing a handshake does can end the process or touch
   another connection.
-- A bounded wait is a `poll(2)` that occupies a carrier OS thread (see
-  "A note on read/write timeouts"), so the pool size is the **most carriers
-  stalled handshakes can occupy**. Keep `--tls-handshake-workers` below the
-  carrier count (`nproc`, or `LANG_NUM_CARRIERS` if set -- the server warns
-  when it can see that the pool is not below it) and established connections
-  keep being served however many handshakes are stalled.
-- The cost of that bound is the second thing to know: silent connections
-  queue for the workers, so *k* of them delay a legitimate client by up to
+- A bounded wait parks the waiting green thread only, never a carrier OS
+  thread, so stalled handshakes cannot starve established connections
+  whatever the pool size or carrier count (`nproc`, or `LANG_NUM_CARRIERS`):
+  the tests run with two carriers, four silent connections and eight
+  workers, and a real request still completes in a fraction of a second.
+  (Earlier versions of the standard library did a blocking `poll(2)` on the
+  carrier, which is why this server used to size the pool below the carrier
+  count and warn when it was not.)
+- The cost of the pool is that silent connections queue for the workers, so
+  *k* of them delay a legitimate client by up to
   about *k* x timeout / workers (8 silent clients on 2 workers with a 0.7 s
   timeout delay a good client by under 3 s in the tests). Up to 256
   connections wait for a worker; past that the accept loop waits and the
-  kernel's listen backlog takes over. The timeout bounds each *read*, not the
-  whole handshake (`lib/tlsserver.m31`, "Denial of service"), so a peer that
-  drips a byte per timeout can hold a worker much longer. Rate-limit in
+  kernel's listen backlog takes over. The timeout bounds each *read* and
+  the deadline the whole handshake (`lib/tlsserver.m31`, "Denial of service"),
+  so a peer that drips a byte per timeout holds a worker for at most 30 s.
+  Rate-limit in
   front of this server if hostile clients matter; this is a stdlib limit,
   not something `main.m31` can tighten with the primitives there are.
 
@@ -121,23 +134,18 @@ write today on top of `serve_conn`."
 ## A note on read/write timeouts
 
 This server does **not** call `set_read_timeout`/`set_write_timeout` on its
-connections, unlike `http.serve`'s own default (`deadline()`, 30s both
-ways). That is a deliberate choice, not an oversight -- see
-`BENCHMARK.md`'s "A second finding" for the full account: a *bounded*
-wait on a non-blocking socket is implemented in `lib/net.m31` with a real
-blocking `poll(2)` syscall on the calling green thread's own carrier OS
-thread, because a non-blocking socket has no kernel-level receive timeout to
-fall back on any more. That syscall does not free its carrier the way the
-reactor-parked, unbounded wait does, so once concurrently open idle
-keep-alive connections outnumber the carrier count (`nproc`, by default),
-every carrier can end up parked inside somebody else's `poll()`, with none
-left to service the rest -- a severe, reproducible stall, not a crash or a
-wrong answer. Leaving the timeout at its default (wait forever,
-cooperatively, via the reactor) is what makes this server actually scale
-with concurrency, at the cost of a silent, never-sending peer holding a
-green thread open indefinitely -- cheap (one small stack), but not free, and
-a production server would want a real answer to this before shipping, which
-is exactly what `BENCHMARK.md` recommends as follow-up work.
+established connections, unlike `http.serve`'s own default (`deadline()`, 30s
+both ways). A silent, never-sending peer therefore holds a green thread open
+until it disconnects -- cheap (one small stack), but not free.
+
+That used to be forced: a *bounded* wait on a non-blocking socket was a real
+blocking `poll(2)` on the carrier OS thread (see `BENCHMARK.md`'s "A second
+finding"), and once idle keep-alive connections with a timeout outnumbered
+the carriers, none was left to run anything else. The standard library no
+longer does that -- a socket's timeout now parks only the green thread -- so
+the stall is gone, whether or not a timeout is set, and a deployment that
+wants idle connections reaped can add one. `BENCHMARK.md` and `SCALING.md`
+record the measurements taken before that change.
 
 ## Testing
 
@@ -162,8 +170,10 @@ mocking):
    A throwaway CA, an Ed25519 leaf and a P-256 leaf are made with `openssl`;
    the clients are `curl --cacert`, the standard library's own `https`
    client with a custom `tls.Trust.CaFile` (`scripts/https_client.m31`; it
-   cannot verify an Ed25519 certificate, so it talks to the P-256 server),
-   and Python's `ssl`. Covered: a valid request, keep-alive (curl reuses one
+   verifies both the P-256 and the Ed25519 certificate), and Python's `ssl`.
+   Servers are also started from DER files (a P-256 chain with a PKCS#8 key,
+   a single certificate with a SEC1 key, an Ed25519 chain with a PKCS#8 key,
+   and PEM/DER mixes), each checked with all three clients. Covered: a valid request, keep-alive (curl reuses one
    connection; five requests and then `Connection: close` over Python's),
    the CA being required, the limits (a 9000-byte header line, a malformed
    request, 1000 requests per connection) giving the same answers as plain
@@ -172,8 +182,12 @@ mocking):
    with the server still serving afterwards, a client that connects and
    sends nothing and one that stops mid-record (both closed within the
    timeout, a good client unaffected, then eight silent clients on two
-   workers), and startup refusal of a key that is not the certificate's, an
-   RSA key, an encrypted key, a garbage key, a DER or missing certificate,
+   workers), **silent clients on two carriers** (`LANG_NUM_CARRIERS=2`, four
+   connections that open and send nothing, over plain HTTP and over https:
+   real requests still complete in under a second), and startup refusal of
+   a key that is not the certificate's (PEM or DER), an RSA key, an encrypted
+   key, a garbage or truncated key, a certificate file that is not one, a
+   missing certificate,
    one flag without the other, and a zero timeout or worker count -- with
    every refusal and every server output checked for key material.
 

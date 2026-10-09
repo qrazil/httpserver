@@ -292,8 +292,19 @@ else
         openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
             | openssl pkcs8 -topk8 -v2 aes256 -passout pass:throwaway -out encrypted.key
         printf 'this is not a key\n' >garbage.key
-        # A certificate in DER: this server reads PEM only.
+        # The same material in DER: certificates (single, and a chain laid end
+        # to end), and keys as PKCS#8 and as SEC1 EC.
         openssl x509 -in p256.pem -outform der -out p256.der
+        openssl x509 -in ed25519.pem -outform der -out ed25519.der
+        openssl x509 -in ca.pem -outform der -out ca.der
+        cat p256.der ca.der >p256.chain.der
+        cat ed25519.der ca.der >ed25519.chain.der
+        openssl pkey -in p256.key -outform der -out p256.pk8.der
+        openssl ec -in p256.key -outform der -out p256.sec1.der
+        openssl pkey -in ed25519.key -outform der -out ed25519.pk8.der
+        openssl pkey -in stranger.key -outform der -out stranger.pk8.der
+        # Not a key and not a certificate, in DER's clothing.
+        head -c 48 p256.pk8.der >truncated.pk8.der
     ) >"$WORK/fixtures.log" 2>&1 || { bad "https fixtures" "$(tail -5 "$WORK/fixtures.log")"; have_https=0; }
 fi
 
@@ -475,6 +486,28 @@ elif mode == "silent":
     print("OK %d silent + 1 stalled connections all closed by the server within %.1fs; a good client waited %.1fs"
           % (count, max(closed_at.values()), took))
 
+elif mode == "blocked":
+    # sys.argv[5]: how many silent connections (a socket opened and then
+    # nothing, no TLS hello for https); sys.argv[6]: ceiling in seconds for a
+    # real request made while they are all still open.
+    count, ceiling = int(sys.argv[5]), float(sys.argv[6])
+    silent = [socket.create_connection((HOST, port), timeout=30) for _ in range(count)]
+    time.sleep(0.3)
+    began = time.time()
+    peer = Peer(connect())
+    got = peer.response(GET)
+    took = time.time() - began
+    check(got is not None and got[0] == "HTTP/1.1 200 OK" and got[2] == b"Hello, World!\n", "request behind silent connections: %r" % (got,))
+    check(took < ceiling, "request took %.2fs behind %d silent connections (ceiling %.1fs)" % (took, count, ceiling))
+    # And a second one, on a fresh connection, with the silent ones still open.
+    began = time.time()
+    got = Peer(connect()).response(GET)
+    again = time.time() - began
+    check(got is not None and got[0] == "HTTP/1.1 200 OK" and again < ceiling, "second request: %r after %.2fs" % (got, again))
+    for sock in silent:
+        sock.close()
+    print("OK %d silent connections open, real requests took %.2fs and %.2fs" % (count, took, again))
+
 else:
     print("unknown mode " + mode)
     sys.exit(2)
@@ -531,6 +564,60 @@ PY
         bad "https server (Ed25519) start" "$(cat "$WORK/ed.log")"
     fi
     stop_https
+
+    # -- an Ed25519 server: the standard library's own https client --------------
+    # (it used to be unable to verify an Ed25519 certificate)
+    if start_https ed25519std "$FX/ed25519.chain" "$FX/ed25519.key"; then
+        if [ "$HCLIENT_BUILT" = 1 ]; then
+            out=$("$WORK/https_client" "https://localhost:$HPORT/" "$FX/ca.pem" 2>&1)
+            if [ "$out" = $'status 200\nbody 14' ]; then
+                note "https (stdlib client, Trust.CaFile) verifies the Ed25519 certificate: 200, 14-byte body"
+            else
+                bad "https stdlib client on the Ed25519 server" "$out"
+            fi
+            out=$("$WORK/https_client" "https://localhost:$HPORT/" "$FX/other-ca.pem" 2>&1)
+            if [ $? -ne 0 ] && printf '%s' "$out" | grep -q '^error '; then
+                note "https (stdlib client): an Ed25519 certificate from another CA is refused"
+            else
+                bad "https stdlib client with the wrong CA (Ed25519)" "$out"
+            fi
+        fi
+    else
+        bad "https server (Ed25519, stdlib client) start" "$(cat "$WORK/ed25519std.log")"
+    fi
+    stop_https
+
+    # -- DER certificates and keys -------------------------------------------------
+    # der_serves NAME CHAIN KEY: a server loaded from these files answers python's
+    # ssl (verifying against the CA), the stdlib client and, if present, curl.
+    der_serves() {
+        local name=$1 chain=$2 key=$3
+        if start_https "$name" "$chain" "$key"; then
+            local ok=1 detail=""
+            out=$(tls_client keepalive "$HPORT" tls "$FX/ca.pem" 2>&1) || { ok=0; detail="python: $out"; }
+            if [ "$HCLIENT_BUILT" = 1 ]; then
+                out=$("$WORK/https_client" "https://localhost:$HPORT/" "$FX/ca.pem" 2>&1)
+                [ "$out" = $'status 200\nbody 14' ] || { ok=0; detail="$detail stdlib client: $out"; }
+            fi
+            if command -v curl >/dev/null 2>&1; then
+                out=$(curl -s --max-time 10 --cacert "$FX/ca.pem" "https://localhost:$HPORT/")
+                [ "$out" = "Hello, World!" ] || { ok=0; detail="$detail curl: [$out]"; }
+            fi
+            if [ "$ok" = 1 ]; then
+                note "https from DER ($name): python ssl, stdlib client and curl all verify and get 200"
+            else
+                bad "https from DER ($name)" "$detail"
+            fi
+        else
+            bad "https server from DER ($name) start" "$(cat "$WORK/$name.log")"
+        fi
+        stop_https
+    }
+    der_serves der_p256_pkcs8 "$FX/p256.chain.der" "$FX/p256.pk8.der"
+    der_serves der_p256_sec1 "$FX/p256.der" "$FX/p256.sec1.der"
+    der_serves der_ed25519_pkcs8 "$FX/ed25519.chain.der" "$FX/ed25519.pk8.der"
+    der_serves der_pem_chain_der_key "$FX/p256.chain" "$FX/p256.pk8.der"
+    der_serves der_chain_pem_key "$FX/ed25519.chain.der" "$FX/ed25519.key"
 
     # -- a P-256 server: the standard library's own https client ---------------
     if start_https p256 "$FX/p256.pem" "$FX/p256.key"; then
@@ -602,6 +689,35 @@ PY
     fi
     stop_https
 
+    # -- silent clients no longer hold carriers -------------------------------------
+    # Two carriers, four connections that open and send nothing: a real request
+    # still completes at once, over plain HTTP and over https. (Sockets' timeouts
+    # park the green thread only; they used to occupy the carrier in poll(2).)
+    # The https server has more handshake workers than carriers on purpose: the
+    # workers' bounded waits are exactly what used to take carriers, and the four
+    # silent handshakes now sit on four workers with four more left.
+    LANG_NUM_CARRIERS=2 start_https carriers_tls "$FX/p256.pem" "$FX/p256.key" --tls-handshake-workers 8
+    if [ -n "${HPID:-}" ] && kill -0 "$HPID" 2>/dev/null; then
+        if out=$(tls_client blocked "$HPORT" tls "$FX/ca.pem" 4 1 2>&1); then
+            note "https, LANG_NUM_CARRIERS=2: $out"
+        else
+            bad "https silent clients on 2 carriers" "$out"
+        fi
+    else
+        bad "https server (2 carriers) start" "$(cat "$WORK/carriers_tls.log")"
+    fi
+    stop_https
+    PLAIN_PORT=$((20000 + (RANDOM % 20000)))
+    LANG_NUM_CARRIERS=2 "$BIN" --port "$PLAIN_PORT" --host 127.0.0.1 >"$WORK/carriers_plain.log" 2>&1 &
+    HPIDS+=("$!")
+    sleep 0.5
+    if out=$(tls_client blocked "$PLAIN_PORT" plain "" 4 1 2>&1); then
+        note "plain http, LANG_NUM_CARRIERS=2: $out"
+    else
+        bad "plain silent clients on 2 carriers" "$out"
+    fi
+    stop_https
+
     # -- startup refusals ---------------------------------------------------------
     refuse() { # refuse NAME EXPECTED-EXIT PATTERN args...
         local name=$1 want=$2 pattern=$3
@@ -620,7 +736,10 @@ PY
     refuse "encrypted key" 1 'encrypted' --tls-cert "$FX/p256.pem" --tls-key "$FX/encrypted.key"
     refuse "garbage key file" 1 'no usable private key' --tls-cert "$FX/p256.pem" --tls-key "$FX/garbage.key"
     refuse "key file used as the certificate" 1 'no valid PEM certificate' --tls-cert "$FX/p256.key" --tls-key "$FX/p256.key"
-    refuse "DER certificate (PEM only)" 1 'could not be read' --tls-cert "$FX/p256.der" --tls-key "$FX/p256.key"
+    refuse "DER key is not the certificate's" 1 'does not match' --tls-cert "$FX/p256.der" --tls-key "$FX/stranger.pk8.der"
+    refuse "Ed25519 DER key for a P-256 DER certificate" 1 'does not match' --tls-cert "$FX/p256.der" --tls-key "$FX/ed25519.pk8.der"
+    refuse "truncated DER key" 1 'no usable private key' --tls-cert "$FX/p256.der" --tls-key "$FX/truncated.pk8.der"
+    refuse "DER key used as the certificate" 1 'could not be parsed' --tls-cert "$FX/p256.pk8.der" --tls-key "$FX/p256.pk8.der"
     refuse "missing certificate file" 1 'could not be read' --tls-cert "$WORK/nowhere.pem" --tls-key "$FX/p256.key"
     refuse "--tls-cert without --tls-key" 2 'go together' --tls-cert "$FX/p256.pem"
     refuse "--tls-key without --tls-cert" 2 'go together' --tls-key "$FX/p256.key"
@@ -628,7 +747,7 @@ PY
     refuse "--tls-handshake-workers 0" 2 'must be at least 1' --tls-cert "$FX/p256.pem" --tls-key "$FX/p256.key" --tls-handshake-workers 0
 
     # -- no key material anywhere a server writes ---------------------------------
-    if no_key_material "$WORK"/ed.log "$WORK"/p256.log "$WORK"/silent.log "$WORK/server.log"; then
+    if no_key_material "$WORK"/*.log; then
         note "no key material in any server output"
     else
         bad "key material in a server log" "$(head -3 "$WORK/p256.log")"
