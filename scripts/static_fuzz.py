@@ -193,7 +193,7 @@ check("%d malformed request lines / headers / framings: every one answered, none
 mark = len(problems)
 
 # --- 5. invalid UTF-8 and raw control bytes in the request target (an m31 0.3.2 http.read_request trap,
-#        guarded in fileserver.m31): 400, and the server lives ---
+#        guarded in HTTP_fileserver.m31): 400, and the server lives ---
 for t in [b"/\xff", b"/?\xff", b"/hello.txt\xff", b"/\xc0\xaf", b"/\xed\xa0\x80", b"/\xf4\x90\x80\x80", b"/\x80", b"/%ff",
           b"/hello.txt?q=\xfe\xff", b"/\xe2\x82", b"/sub/\xff/..", b"/\x00", b"/\x01", b"/\x7f", b"/\r", b"/\xc3\xa9"]:
     count += 1

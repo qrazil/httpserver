@@ -1,7 +1,7 @@
 # `httpserver` -- a "Hello, World!" HTTP/1.1 server, and a static file server
 
 The first real network *server* application written in this language: built
-on `lib/http.m31`'s real `Handler`/`serve_conn` machinery (request/response
+on `lib/net/http.m31`'s real `Handler`/`serve_connection` machinery (request/response
 parsing and writing, framing, keep-alive -- nothing hand-rolled), to exercise
 and measure what tonight's green-thread concurrency fix actually bought.
 Every accepted connection gets its own green thread and every request gets
@@ -41,7 +41,7 @@ the listener speaks plain HTTP exactly as before. One port speaks one or the
 other, never both. RSA keys, encrypted keys, ALPN beyond `http/1.1`,
 client certificates (the server never asks for one, so an Ed25519 client
 certificate is not something it can be tested with), session resumption and
-0-RTT are not supported (`lib/tlsserver.m31` documents the full list; it serves TLS 1.3
+0-RTT are not supported (`lib/tls/tlsserver.m31` documents the full list; it serves TLS 1.3
 with `TLS_CHACHA20_POLY1305_SHA256` and x25519 only).
 
 The pair is loaded and checked **before the port is opened**: an unreadable
@@ -57,7 +57,7 @@ the same handler, keep-alive, the `http.MAX_REQUESTS` cap per connection, the
 same refusal (and the same 400/431 answers) for a malformed or oversized
 request, and no read or write timeout on an established connection.
 Both go through `http.serve_stream`, which takes any `io.Stream`
-(`http.serve_conn` is its `net.Conn` wrapper), so a TLS connection is served
+(`http.serve_connection` is its `net.Conn` wrapper), so a TLS connection is served
 by the very loop the plain path uses; the tests compare the two paths'
 answers.
 
@@ -98,7 +98,7 @@ has said a word, so it is handled apart from everything else:
   timeout delay a good client by under 3 s in the tests). Up to 256
   connections wait for a worker; past that the accept loop waits and the
   kernel's listen backlog takes over. The timeout bounds each *read* and
-  the deadline the whole handshake (`lib/tlsserver.m31`, "Denial of service"),
+  the deadline the whole handshake (`lib/tls/tlsserver.m31`, "Denial of service"),
   so a peer that drips a byte per timeout holds a worker for at most 30 s.
   Rate-limit in
   front of this server if hostile clients matter; this is a stdlib limit,
@@ -189,7 +189,7 @@ tree only the server's operator can write.
 
 Also: the request target that is not valid UTF-8 (`GET /\xff`) crashed the
 whole process in m31 0.3.2's `http.read_request` (a trap, not an error). Both
-modes now filter the request line first and answer 400. See `fileserver.m31`;
+modes now filter the request line first and answer 400. See `HTTP_fileserver.m31`;
 delete the guard when the standard library is fixed.
 
 Limits worth knowing: no `sendfile`/`mmap` from m31 (every byte is read and
@@ -217,9 +217,9 @@ clone, by construction. `hello` here is exactly that, so this program writes
 its own accept loop (the same shape as
 `runtime/net_concurrency_demo/main.m31`): `ln.accept()`, `spawn
 handle_conn(c)`, repeat, with `handle_conn` calling the public
-`http.serve_conn(c, hello)` on its own green thread. This is precisely the
+`http.serve_connection(c, hello)` on its own green thread. This is precisely the
 pattern `http.serve`'s doc comment describes as "a program a caller can
-write today on top of `serve_conn`."
+write today on top of `serve_connection`."
 
 ## A note on read/write timeouts
 
@@ -245,7 +245,7 @@ mocking):
 
 1. A single request: status 200, the exact body, a correct `Content-Length`.
 2. A second request on the **same** kept-alive connection gets the same
-   answer (`serve_conn`'s keep-alive loop is exercised, not just one
+   answer (`serve_connection`'s keep-alive loop is exercised, not just one
    request-then-close).
 3. Several different paths/methods all get the same reply (this handler
    ignores the request entirely, on purpose).

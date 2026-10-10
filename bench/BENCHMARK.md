@@ -1,7 +1,7 @@
 # `httpserver` vs. a minimal Go `net/http` server
 
 A throughput/latency comparison between `httpserver` (this project's
-"Hello, World!" server, built on `lib/http.m31`'s real `Handler`/`serve_conn`
+"Hello, World!" server, built on `lib/net/http.m31`'s real `Handler`/`serve_connection`
 machinery, one green thread per connection) and `bench/goserver`
 (the same thing, `net/http` only, no third-party dependencies). Two findings
 came out of this exercise: the throughput/latency comparison itself, and a
@@ -215,7 +215,7 @@ hit the same ceiling today. Worth flagging to whoever owns
 - Until then, a server that wants both real concurrency *and* protection
   against a silent/slow peer needs a different mitigation than
   `set_read_timeout` -- for instance, a `max_requests` cap (already a
-  `serve_conn` parameter) plus a watchdog green thread that closes a
+  `serve_connection` parameter) plus a watchdog green thread that closes a
   connection externally after some wall-clock budget, which never calls
   `__poll` at all.
 

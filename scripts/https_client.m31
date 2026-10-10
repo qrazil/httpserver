@@ -5,13 +5,13 @@
 //
 // Prints `status N` and `body SIZE` and exits 0, or prints `error SENTENCE`
 // and exits 1 (a certificate the CA did not sign, a failed handshake, ...).
-import http;
-import https;
+import net.http;
+import net.https;
 import io;
 import os;
 import tls;
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 3) {
     io.eprint("usage: https_client URL CA_FILE");
     os.exit(2);

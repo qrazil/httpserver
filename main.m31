@@ -1,4 +1,4 @@
-// httpserver -- a "Hello, World!" HTTP/1.1 server over lib/http.m31's real
+// httpserver -- a "Hello, World!" HTTP/1.1 server over lib/net/http.m31's real
 // Handler/serve machinery, built to prove (and measure) what tonight's
 // concurrency fix bought: every accepted connection gets its own green
 // thread, so N simultaneous clients are served concurrently rather than one
@@ -11,7 +11,7 @@
 //   httpserver --help
 //
 // Why this does not just call `http.serve(ln, hello)`: that function is
-// documented (lib/http.m31, "One connection at a time, and why") to serve
+// documented (lib/net/http.m31, "One connection at a time, and why") to serve
 // one connection to completion before accepting the next, because a
 // *borrowed* `Handler` parameter cannot be moved into a `spawn`ed green
 // thread. `hello` below sidesteps that: a plain top-level function used
@@ -20,16 +20,16 @@
 // interface) pair -- free across threads, nothing to move or clone. So this
 // program writes its own accept loop (the same shape as
 // `runtime/net_concurrency_demo/main.m31`), `spawn`ing `handle_connection` per
-// accepted connection and calling the public `http.serve_conn` inside it.
+// accepted connection and calling the public `http.serve_connection` inside it.
 import args;
-import fileserver;
+import HTTP_fileserver;
 import fs;
-import http;
+import net.http;
 import net;
 import io;
 import os;
 import timer;
-import tlsserver;
+import tls.tlsserver;
 
 // **Deliberately no `set_read_timeout`/`set_write_timeout` on an established
 // connection.** A client that opens a connection and never sends anything
@@ -52,14 +52,14 @@ http.Response hello(http.Request request) {
 
 // One accepted connection, on its own green thread, to its end.
 void handle_connection(net.Conn connection) {
-    // `serve_conn` already answers a malformed request and closes on its
+    // `serve_connection` already answers a malformed request and closes on its
     // own; a transport-level `Err` here (socket gone, peer reset) is not
     // this server's failure either -- one connection's end is not the
     // server's (same reasoning `http.serve`'s own doc comment gives).
     //
-    // The stream goes through `fileserver.guard`: m31 0.3.2's request parser
+    // The stream goes through `HTTP_fileserver.guard`: m31 0.3.2's request parser
     // traps (ending the whole process) on a request target that is not UTF-8.
-    match (http.serve_stream(fileserver.guard(connection), hello)) {
+    match (http.serve_stream(HTTP_fileserver.guard(connection), hello)) {
         case Ok(int served): {
         }
         case Err(http.Error error): {
@@ -70,14 +70,14 @@ void handle_connection(net.Conn connection) {
 
 // The same, serving a directory (`--root`). `site` is this connection's own
 // copy (see `accept_loop`).
-void handle_static_connection(net.Conn connection, fileserver.Site site) {
-    int served = fileserver.serve(connection, site);
+void handle_static_connection(net.Conn connection, HTTP_fileserver.Site site) {
+    int served = HTTP_fileserver.serve(connection, site);
     Result<bool, io.Error> closed = connection.close();
 }
 
 // The one function an accepted connection is spawned into: a move into a
 // `spawn` cannot sit in a branch, so the choice is made inside the thread.
-void handle_accepted(net.Conn connection, fileserver.Site site, bool is_static) {
+void handle_accepted(net.Conn connection, HTTP_fileserver.Site site, bool is_static) {
     if (is_static) {
         handle_static_connection(connection, site);
     } else {
@@ -107,7 +107,7 @@ void refuse_or_back_off(net.Error error) {
 //
 // With a site, each connection is handed its own deep copy of it: `spawn`
 // moves its arguments, and what moves must be owned by nobody else.
-void accept_loop(net.Listener listener, fileserver.Site site, bool is_static) {
+void accept_loop(net.Listener listener, HTTP_fileserver.Site site, bool is_static) {
     while (true) {
         match (listener.accept()) {
             case Ok(net.Conn connection): {
@@ -162,7 +162,7 @@ const int HANDSHAKE_QUEUE = 256;
 
 // One finished TLS handshake, on its own green thread, to its end.
 void handle_secure_connection(tlsserver.Conn secure) {
-    match (http.serve_stream(fileserver.guard(secure), hello)) {
+    match (http.serve_stream(HTTP_fileserver.guard(secure), hello)) {
         case Ok(int served): {
         }
         case Err(http.Error error): {
@@ -171,12 +171,12 @@ void handle_secure_connection(tlsserver.Conn secure) {
     Result<bool, io.Error> closed = secure.close();
 }
 
-void handle_static_secure_connection(tlsserver.Conn secure, fileserver.Site site) {
-    int served = fileserver.serve(secure, site);
+void handle_static_secure_connection(tlsserver.Conn secure, HTTP_fileserver.Site site) {
+    int served = HTTP_fileserver.serve(secure, site);
     Result<bool, io.Error> closed = secure.close();
 }
 
-void handle_accepted_secure(tlsserver.Conn secure, fileserver.Site site, bool is_static) {
+void handle_accepted_secure(tlsserver.Conn secure, HTTP_fileserver.Site site, bool is_static) {
     if (is_static) {
         handle_static_secure_connection(secure, site);
     } else {
@@ -211,7 +211,7 @@ Result<tlsserver.Conn, tlsserver.Error> next_handshake(Chan<net.Conn> pending, t
 // bounded per-read timeout, and on success give the connection a green
 // thread of its own. A failed handshake has already closed its socket
 // (`tlsserver.accept`'s contract) and is nobody's failure but the peer's.
-void handshake_worker(Chan<net.Conn> pending, str chain_path, str key_path, int timeout_ms, fileserver.Site site, bool is_static) {
+void handshake_worker(Chan<net.Conn> pending, str chain_path, str key_path, int timeout_ms, HTTP_fileserver.Site site, bool is_static) {
     tlsserver.Config config = load_tls_config(chain_path, key_path);
     while (true) {
         match (next_handshake(pending, config, timeout_ms)) {
@@ -233,7 +233,7 @@ void check_tls_config(str chain_path, str key_path) {
 // Serve https on `listener` forever: start the handshake workers, then
 // hand every accepted connection to them. Like `accept_loop`, but each
 // connection goes to a handshake worker first.
-void serve_tls(net.Listener listener, str chain_path, str key_path, int workers, int timeout_ms, fileserver.Site site, bool is_static) {
+void serve_tls(net.Listener listener, str chain_path, str key_path, int workers, int timeout_ms, HTTP_fileserver.Site site, bool is_static) {
     Chan<net.Conn> pending = Chan<net.Conn>(HANDSHAKE_QUEUE);
     for (int i in 0 .. workers) {
         spawn handshake_worker(pending, clone(chain_path), clone(key_path), timeout_ms, site.copy(), is_static);
@@ -269,7 +269,7 @@ cli.flag("listing", help: "--root: list a directory that has no index file (HTML
 cli.flag("dotfiles", help: "--root: serve and list names that begin with a dot (hidden by default)");
 cli.integer("cache", help: "--root: Cache-Control max-age in seconds (0: no-cache, always revalidate)", placeholder: "SECONDS", default: "0");
 cli.integer("backlog", help: "listen backlog (see lib/net.m31's own doc comment on `listen`)", placeholder: "N", default: "65535");
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 argv.remove_at(0);
 match (cli.parse(argv)) {
     case Err(args.UsageError error): {
@@ -304,19 +304,19 @@ match (cli.parse(argv)) {
                 int handshake_workers = parsed.integer("tls-handshake-workers").or(4);
                 str root = parsed.value("root").or("");
                 str index = parsed.value("index").or("index.html");
-                bool listing = parsed.given("listing");
-                bool dotfiles = parsed.given("dotfiles");
+                bool is_listing = parsed.is_given("listing");
+                bool is_dotfiles = parsed.is_given("dotfiles");
                 int cache = parsed.integer("cache").or(0);
                 bool is_static = root != "";
-                if (!is_static && (listing || dotfiles || parsed.given("index") || parsed.given("cache"))) {
+                if (!is_static && (is_listing || is_dotfiles || parsed.is_given("index") || parsed.is_given("cache"))) {
                     io.eprint("httpserver: --index, --listing, --dotfiles and --cache need --root");
                     os.exit(2);
                 }
-                if (is_static && !fs.is_dir(root)) {
+                if (is_static && !fs.is_directory(root)) {
                     io.eprint("httpserver: --root " + root + ": not a directory");
                     os.exit(2);
                 }
-                if (!fileserver.valid_index(index)) {
+                if (!HTTP_fileserver.is_valid_index(index)) {
                     io.eprint("httpserver: --index " + index + ": must be a plain file name");
                     os.exit(2);
                 }
@@ -324,7 +324,7 @@ match (cli.parse(argv)) {
                     io.eprint("httpserver: --cache " + cache.to_str() + ": must be 0 or more");
                     os.exit(2);
                 }
-                fileserver.Site site = fileserver.Site(root, index: index, listing: listing, dotfiles: dotfiles, cache: cache);
+                HTTP_fileserver.Site site = HTTP_fileserver.Site(root, index: index, is_listing: is_listing, is_dotfiles: is_dotfiles, cache: cache);
                 bool is_tls = chain_path != "" || key_path != "";
                 if (is_tls && (chain_path == "" || key_path == "")) {
                     io.eprint("httpserver: --tls-cert and --tls-key go together");
