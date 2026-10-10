@@ -1,4 +1,4 @@
-# `httpserver` -- a "Hello, World!" HTTP/1.1 server
+# `httpserver` -- a "Hello, World!" HTTP/1.1 server, and a static file server
 
 The first real network *server* application written in this language: built
 on `lib/http.m31`'s real `Handler`/`serve_conn` machinery (request/response
@@ -17,6 +17,7 @@ a correct `Content-Length`, body `Hello, World!\n`.
     httpserver --host 127.0.0.1        listen on a specific address only
     httpserver --tls-cert chain.pem --tls-key key.pem
                                        serve https instead of http
+    httpserver --root ./public         serve the files under ./public
     httpserver --help
 
 Port and host are command-line flags, not environment variables: this
@@ -109,6 +110,95 @@ one cannot be shared between green threads.
 
 Other flags: `--tls-handshake-timeout-ms MS`, `--tls-handshake-workers N`.
 
+## Serving files: `--root DIR`
+
+    httpserver --root ./public --port 8080
+    httpserver --root ./public --listing --cache 3600
+    httpserver --root ./public --tls-cert chain.pem --tls-key key.pem
+
+With `--root` the server answers `GET` and `HEAD` for files below DIR instead of
+"Hello, World!". Plain http and https both work; the same code serves both.
+
+| flag | meaning |
+|---|---|
+| `--root DIR` | the directory to serve (must exist) |
+| `--index NAME` | file a directory answers with (default `index.html`) |
+| `--listing` | list a directory that has no index file; off by default (403) |
+| `--dotfiles` | serve and list names that begin with `.`; hidden by default |
+| `--cache SECONDS` | `Cache-Control: public, max-age=N`; 0 (default) is `no-cache`, i.e. always revalidate |
+
+The other flags (`--host`, `--port`, `--backlog`, `--tls-*`) are unchanged.
+`--index`, `--listing`, `--dotfiles` and `--cache` without `--root` are a usage
+error. Without `--root` nothing changes: every request still gets the fixed
+reply.
+
+What it does:
+
+- **Content-Type** from the extension, case-insensitively (html, htm, css, js,
+  mjs, json, txt, md, csv, xml, svg, png, jpg, gif, webp, avif, ico, pdf, wasm,
+  woff/woff2, fonts, archives, audio, video, ...), `charset=utf-8` on text
+  types, `application/octet-stream` for anything else. `X-Content-Type-Options:
+  nosniff` on everything.
+- **Directories**: `/dir` redirects (301) to `/dir/`, rebuilt from the decoded
+  path so a request like `//host` can never become an open redirect; `/dir/`
+  serves its index file, else the listing if `--listing`, else 403.
+- **Listing** is HTML (names escaped, links quoted, a `default-src 'none'`
+  CSP), or JSON with `Accept: application/json` (when `text/html` is not also
+  accepted), `?json` or `?format=json`: `{"path", "entries": [{"name", "type",
+  "size", "mtime"}], "truncated"}`, directories first, sorted, at most 10000
+  entries. Symlinks and (without `--dotfiles`) dotfiles are not listed.
+- **Validators and conditionals** (RFC 9110 order): strong `ETag` (mtime in
+  nanoseconds and size) and `Last-Modified` on every file response;
+  `If-Match` / `If-Unmodified-Since` (412), `If-None-Match` /
+  `If-Modified-Since` (304, with the validators and `Cache-Control`).
+- **One byte range**: `Accept-Ranges: bytes`, `206` with `Content-Range`, `416`
+  with `Content-Range: bytes */SIZE`, `If-Range`. Several ranges, other units or a
+  malformed `Range` get the whole file (RFC 9110 14.2 allows it). `HEAD`
+  ignores `Range`.
+- **Streaming**: a file is read and written in 64 KiB pieces (the first piece
+  goes out with the head in one write), so memory is flat whatever the size,
+  and keep-alive, pipelining and `Connection: close` work around it. A client
+  that goes away mid-download costs nothing.
+- Errors are `text/plain` with a one-line body that never repeats anything the
+  client sent: 400 (bad path), 403, 404, 405 (`Allow: GET, HEAD, OPTIONS`),
+  412, 414, 416, 503 (out of descriptors).
+
+### What a request can reach
+
+The path is split on `/` and each piece is percent-decoded **once**, then
+checked:
+
+- a piece that decodes to something with a NUL or other control character, a
+  `/` (`%2f`) or a `\` is a 400;
+- a piece that decodes to `..` (`..`, `%2e%2e`, `.%2e`, ...) is a 400, wherever
+  it is. Real clients resolve `..` before sending, so one that arrives is an
+  attack, not a typo;
+- double encoding is not decoded twice: `%252e%252e` is a file named `%2e%2e`;
+- a name that starts with `.` is a 404, byte-identical to a missing file's
+  (no existence oracle), unless `--dotfiles`;
+- **a symbolic link is never served and never followed**: every component below
+  the root is checked with `lstat` and a link anywhere is a 403, whether it
+  points outside the root or not. The standard library has no `realpath` or
+  `readlink`, so "the link stays inside" cannot be verified, and refusing all
+  of them is the only safe answer. (The root itself may be a link.)
+- only regular files are opened (a FIFO or device is a 404, never opened).
+
+One thing no path check can fix: between the `lstat` and the `open` someone who
+can *write* inside the served tree could swap a directory for a link. Serve a
+tree only the server's operator can write.
+
+Also: the request target that is not valid UTF-8 (`GET /\xff`) crashed the
+whole process in m31 0.3.2's `http.read_request` (a trap, not an error). Both
+modes now filter the request line first and answer 400. See `fileserver.m31`;
+delete the guard when the standard library is fixed.
+
+Limits worth knowing: no `sendfile`/`mmap` from m31 (every byte is read and
+written in user space), no seek (a range starting at byte N reads and discards
+N bytes first: constant memory, linear time), no `Content-Encoding`
+(no compression), no timeouts on an idle connection (as before), and https
+throughput is that of the pure-m31 TLS stack (a few MB/s per stream).
+`bench/STATIC_BENCHMARK.md` has numbers against Python's `http.server`.
+
 ## Why this is not just `http.serve(ln, hello)`
 
 `http.serve`'s own doc comment ("One connection at a time, and why") says
@@ -190,6 +280,24 @@ mocking):
    missing certificate,
    one flag without the other, and a zero timeout or worker count -- with
    every refusal and every server output checked for key material.
+
+7. **Static files** (`bash scripts/test_static.sh`, run by `test.sh`; needs
+   `python3` and `curl`, https also `openssl`; groups can be run alone:
+   `cli oracle fuzz stream policy https`). Disposable tree with a sibling
+   directory, outside secrets, dotfiles, ten kinds of symlink, a FIFO and
+   random files of 3, 12 and 64 MiB (`STATIC_BIG_MIB`). Oracles: Python's
+   `http.server` (status, body, `Content-Length`, redirects, HEAD, 304),
+   `mimetypes` (types), `curl` (conditional requests, `--range`, `-C -`
+   resume, `-L`, `--path-as-is`). A traversal corpus (named attacks with
+   required statuses, ~3000 generated escape forms, 2500 seeded random
+   targets, malformed request lines and framings, invalid UTF-8) asserting
+   that no secret is ever in a body, every 200 body is a file meant to be
+   served, no 5xx, no unsafe `Location`, and the server is alive after.
+   Large-file streaming with sha256 and a server-RSS bound, ranges into the
+   middle of a 64 MiB file, keep-alive across files/404/301/405/HEAD/206,
+   pipelining, clients that abandon or stall mid-download, 24 concurrent
+   clients, HEAD parity with GET, the listing and dotfile policy, `--index`,
+   `--cache`, and the same streaming and fuzz checks over https.
 
 `BENCHMARK.md` is the throughput/latency comparison against an equivalent Go
 `net/http` server, with methodology, raw numbers and honest caveats; it is

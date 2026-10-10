@@ -759,6 +759,51 @@ PY
     fi
 fi
 
+# --- 7. a request target that is not UTF-8 (m31 0.3.2 trap, guarded) ----------
+# `GET /\xff` made `http.read_request` trap, which ends the whole process.
+
+if command -v python3 >/dev/null 2>&1; then
+    got=$(python3 - "$PORT" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+out = []
+for target in (b"/\xff", b"/?\xff", b"/\xc0\xaf"):
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s.sendall(b"GET " + target + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    out.append(data.split(b" ", 2)[1].decode())
+print(" ".join(out))
+PY
+)
+    if [ "$got" = "400 400 400" ] && kill -0 "$server_pid" 2>/dev/null \
+        && [ "$(curl -s "$BASE/")" = "Hello, World!" ]; then
+        note "non-UTF-8 request target: 400, and the server is still up"
+    else
+        bad "non-UTF-8 request target" "answers: [$got]"
+    fi
+fi
+
+# --- 8. static file serving: its own suite (scripts/test_static.sh) -------------
+
+static_log="$WORK/static.log"
+HTTPSERVER_BIN="$BIN" bash scripts/test_static.sh >"$static_log" 2>&1
+static_rc=$?
+cat "$static_log"
+static_line=$(grep '^static: ' "$static_log" | tail -1)
+static_pass=$(printf '%s' "$static_line" | awk '{print $2}')
+static_fail=$(printf '%s' "$static_line" | awk '{print $4}')
+pass=$((pass + ${static_pass:-0}))
+fail=$((fail + ${static_fail:-0}))
+if [ "$static_rc" != 0 ] && [ "${static_fail:-0}" = 0 ]; then
+    bad "static suite" "exit $static_rc, no summary line"
+fi
+
 # --- summary ------------------------------------------------------------
 
 echo

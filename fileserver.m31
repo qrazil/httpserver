@@ -1,0 +1,1131 @@
+// Static file serving for httpserver: a directory tree answered over HTTP/1.1.
+//
+//   fileserver.Site(root, index:, listing:, dotfiles:, cache:)   what to serve
+//   fileserver.serve(stream, site)    -> int    requests answered on one connection
+//   fileserver.guard(stream)          -> io.Stream   the stream, made safe to parse
+//
+// This is the request loop of `http.serve_stream`, written out here because
+// the standard library's `Response` holds its body as one `bytes` (and
+// `lib/http.m31` says so under "what is deliberately not here": a streaming
+// body). A file server must not read a gigabyte into memory to send it, so
+// anything that has a file behind it is written by this module -- the head,
+// and then the file in 64 KiB pieces, with the connection kept alive after it
+// -- and everything else (errors, listings, 304s, redirects) is an ordinary
+// `http.Response` written by `http.write_response`.
+//
+// --- what a request may reach ------------------------------------------------
+//
+// The URL path is split on `/` and each piece is percent-decoded ONCE, then
+// checked, so what the file system is asked for is exactly what was checked:
+//
+//   - a piece that decodes to something with a NUL or another control
+//     character, a `/` (so `%2f`) or a `\` is refused with 400;
+//   - a piece that decodes to `..` (so `..`, `%2e%2e`, `.%2e`) is refused with
+//     400, whatever the pieces around it are. Clients resolve `..` before
+//     they send, so a request that still has one is not an ordinary client;
+//   - a piece that decodes to `.` and an empty piece (`//`) are dropped;
+//   - decoding is not repeated: `%252e%252e` is the file name `%2e%2e`, which
+//     is looked up like any other name and is not there;
+//   - a name that begins with `.` is not served, and is answered 404 exactly
+//     as a missing one is, unless the server was started with dotfiles on;
+//   - **a symlink is never served and never followed**: every component below
+//     the root is asked about with `lstat` (`fs.is_link`) before the file
+//     system is asked for the path, and a link anywhere on it is a 403. The
+//     standard library has no `realpath` or `readlink`, so "the link points
+//     inside the tree" cannot be checked, and refusing every link is the only
+//     answer that cannot be wrong. The root itself may be reached through a
+//     link (`/tmp` on macOS is one): it is the operator's own word.
+//   - only a regular file is opened; a FIFO, socket or device is never opened.
+//
+// Between the `lstat` and the `open` there is a window in which someone who can
+// WRITE the served tree could swap a directory for a link. A tree an attacker
+// can write to is not a tree this module can protect; the README says so.
+//
+// --- what a response says ----------------------------------------------------
+//
+// `Content-Type` from the file name's extension (`MIME`), with `charset=utf-8`
+// on text; `Content-Length`; `Accept-Ranges: bytes`; a strong `ETag` made of
+// the size and the modification time to the nanosecond; `Last-Modified`;
+// `Cache-Control`; `X-Content-Type-Options: nosniff`; `Date`.
+//
+// Preconditions are RFC 9110 §13.2.2's order: If-Match, If-Unmodified-Since
+// (412); If-None-Match, If-Modified-Since (304 on GET and HEAD); then Range
+// (206, 416), honoured only on GET and only when If-Range, if there is one,
+// still matches. One range is served. A request for several ranges, a unit
+// other than `bytes`, or a Range that is not well formed is answered with the
+// whole file, which RFC 9110 §14.2 allows. Only the IMF-fixdate form of an
+// HTTP date is read; a date in the two obsolete forms is ignored, which for a
+// conditional header means the condition does not apply.
+//
+// A seek is not available (`io.File` has none), so a Range that starts at byte
+// N reads and discards N bytes first: constant memory, linear time.
+
+import date;
+import fs;
+import html;
+import http;
+import io;
+import json;
+
+// The size of one read from a file and one write to a connection.
+const int CHUNK = 65536;
+// Deeper than this is not a path anybody serves.
+const int MAX_DEPTH = 64;
+// The most entries one directory listing shows; past that it says so.
+const int MAX_LISTING = 10000;
+// What a Range or an If-* header may be before it is not looked at.
+const int MAX_FIELD = 2048;
+// Seconds since 1970 for 0001-01-01 and 9999-12-31, the span `date` can spell.
+const int FIRST_DAY = -62135596800;
+const int LAST_DAY = 253402300799;
+const str ALLOW = "GET, HEAD, OPTIONS";
+const Map<str, str> MIME = {"html": "text/html; charset=utf-8", "htm": "text/html; charset=utf-8", "xhtml": "application/xhtml+xml; charset=utf-8", "css": "text/css; charset=utf-8", "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8", "json": "application/json; charset=utf-8", "map": "application/json; charset=utf-8", "jsonld": "application/ld+json; charset=utf-8", "webmanifest": "application/manifest+json; charset=utf-8", "txt": "text/plain; charset=utf-8", "text": "text/plain; charset=utf-8", "log": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8", "markdown": "text/markdown; charset=utf-8", "csv": "text/csv; charset=utf-8", "tsv": "text/tab-separated-values; charset=utf-8", "xml": "application/xml; charset=utf-8", "xsl": "application/xml; charset=utf-8", "rss": "application/rss+xml; charset=utf-8", "atom": "application/atom+xml; charset=utf-8", "ics": "text/calendar; charset=utf-8", "yaml": "application/yaml; charset=utf-8", "yml": "application/yaml; charset=utf-8", "toml": "application/toml; charset=utf-8", "svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "jpe": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "avif": "image/avif", "bmp": "image/bmp", "tif": "image/tiff", "tiff": "image/tiff", "ico": "image/vnd.microsoft.icon", "pdf": "application/pdf", "wasm": "application/wasm", "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf", "otf": "font/otf", "zip": "application/zip", "gz": "application/gzip", "tgz": "application/gzip", "bz2": "application/x-bzip2", "xz": "application/x-xz", "zst": "application/zstd", "tar": "application/x-tar", "7z": "application/x-7z-compressed", "mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "oga": "audio/ogg", "flac": "audio/flac", "m4a": "audio/mp4", "mp4": "video/mp4", "m4v": "video/mp4", "webm": "video/webm", "ogv": "video/ogg", "mov": "video/quicktime", "mkv": "video/x-matroska"};
+const List<str> MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// --- what to serve -------------------------------------------------------------
+/// What a server is serving and how.
+pub type Site {
+    /// The directory every URL path is looked up in.
+    pub str root;
+    /// The file a directory is answered with when it has one.
+    pub str index = "index.html";
+    /// Whether a directory with no index file is listed (403 when not).
+    pub bool listing = false;
+    /// Whether names that begin with `.` are served and listed.
+    pub bool dotfiles = false;
+    /// Seconds a response may be reused without asking again; 0 is `no-cache`.
+    pub int cache = 0;
+}
+
+/// A copy that shares nothing, which is what a `spawn` argument must be.
+pub Site Site.copy() {
+    return Site(clone(root), index: clone(index), listing: listing, dotfiles: dotfiles, cache: cache);
+}
+
+/// Whether `name` can be an index file name: one plain path component.
+pub bool valid_index(str name) {
+    if (name == "" || name == "." || name == "..") {
+        return false;
+    }
+    for (int c in name.to_bytes()) {
+        if (c < 32 || c == 127 || c == '/' || c == '\\') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- the stream, made safe to parse -------------------------------------------
+/// A stream that hands the HTTP parser nothing it cannot take.
+///
+/// m31 0.3.2's `http.read_request` TRAPS -- and a trap ends the whole process
+/// -- on a request target that is not valid UTF-8 (`GET /\xff HTTP/1.1`): the
+/// target becomes the empty string and the parser indexes into it. Every
+/// connection is another green thread of the same process, so one such request
+/// would stop the server for everybody. This wrapper changes every non-ASCII
+/// byte of a request line that is not valid UTF-8 into 0x01, which the parser
+/// refuses with a plain 400. Nothing else is touched. Delete it when the
+/// standard library no longer traps.
+pub type Guard {
+    io.Stream inner;
+}
+
+pub Result<bytes, io.Error> Guard.read(int n) {
+    return inner.read(n);
+}
+
+pub Result<bytes, io.Error> Guard.read_all() {
+    return inner.read_all();
+}
+
+pub Result<bytes, io.Error> Guard.read_until(bytes delim, int limit) {
+    bytes got = inner.read_until(delim, limit)?;
+    scrub(got);
+    return Result<bytes, io.Error>.Ok(got);
+}
+
+pub Result<int, io.Error> Guard.write(bytes b) {
+    return inner.write(b);
+}
+
+pub Result<bool, io.Error> Guard.close() {
+    return inner.close();
+}
+
+// A request head whose first line is not text becomes one the parser refuses.
+void scrub(bytes head) {
+    if (head.size() < 4 || !head.ends_with("\r\n\r\n".to_bytes())) {
+        return;
+    }
+    match (head.index_of("\r\n".to_bytes())) {
+        case Some(int end): {
+            match (head.substr(0, end).utf8()) {
+                case Some(_): {
+                }
+                case None: {
+                    for (int i in 0 .. end) {
+                        if (head[i] >= 128) {
+                            head[i] = 1;
+                        }
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// `stream`, wrapped in a `Guard`.
+pub io.Stream guard(io.Stream stream) {
+    return Guard(stream);
+}
+
+// --- answers -----------------------------------------------------------------------
+// Why a request was not served: the status, and a sentence that never repeats
+// anything the client sent.
+type Refusal {
+    int status;
+    str message;
+}
+
+// What goes back: a response, and -- when a file is the body -- the open file,
+// the bytes to read and discard first, and how many to send after them. A
+// response with a file has no `payload`; this module writes it.
+type Answer {
+    http.Response response;
+    Option<io.File> file = Option<io.File>.None;
+    int skip = 0;
+    int length = 0;
+}
+
+// A thing found in the tree.
+type Located {
+    str path;
+    fs.Stat stat;
+    List<str> parts;
+}
+
+Answer plain(int status, str message) {
+    http.Response response = http.text_response(message + "\n", status: status);
+    response.set("x-content-type-options", "nosniff");
+    return Answer(response);
+}
+
+Answer failed(Refusal refusal) {
+    Answer answer = plain(refusal.status, refusal.message);
+    if (refusal.status == 405) {
+        answer.response.set("allow", ALLOW);
+    }
+    return answer;
+}
+
+Result<Answer, Refusal> refuse(int status, str message) {
+    return Result<Answer, Refusal>.Err(Refusal(status, message));
+}
+
+// The status a failed file operation is answered with.
+int status_of(io.Error error) {
+    match (error) {
+        case NotFound: {
+            return 404;
+        }
+        case PermissionDenied: {
+            return 403;
+        }
+        case IsDirectory: {
+            return 404;
+        }
+        case NotADirectory: {
+            return 404;
+        }
+        case AlreadyExists: {
+            return 500;
+        }
+        case NotEmpty: {
+            return 500;
+        }
+        case InvalidUtf8: {
+            return 500;
+        }
+        case Other(int code): {
+            // EMFILE, ENFILE: out of descriptors, which is the weather.
+            if (code == 24 || code == 23) {
+                return 503;
+            }
+            // ENAMETOOLONG, ELOOP.
+            if (code == 36 || code == 40) {
+                return 404;
+            }
+            return 500;
+        }
+    }
+}
+
+str sentence_of(int status) {
+    if (status == 403) {
+        return "403 Forbidden";
+    }
+    if (status == 404) {
+        return "404 Not Found";
+    }
+    if (status == 503) {
+        return "503 Service Unavailable";
+    }
+    return "500 Internal Server Error";
+}
+
+Refusal refusal_of(io.Error error) {
+    int status = status_of(error);
+    return Refusal(status, sentence_of(status));
+}
+
+// --- the path ------------------------------------------------------------------------
+// One piece of a path, decoded once and checked.
+Result<str, Refusal> decode_segment(str raw) {
+    str seg = "";
+    match (http.unquote(raw)) {
+        case Ok(str decoded): {
+            seg = decoded;
+        }
+        case Err(_): {
+            return Result<str, Refusal>.Err(Refusal(400, "400 Bad Request: malformed percent-encoding"));
+        }
+    }
+    for (int c in seg.to_bytes()) {
+        if (c < 32 || c == 127 || c == '/' || c == '\\') {
+            return Result<str, Refusal>.Err(Refusal(400, "400 Bad Request: not a file name"));
+        }
+    }
+    return Result<str, Refusal>.Ok(seg);
+}
+
+// The checked pieces of a raw (still percent-encoded) path.
+Result<List<str>, Refusal> split_path(str raw_path) {
+    if (!raw_path.starts_with("/")) {
+        return Result<List<str>, Refusal>.Err(Refusal(400, "400 Bad Request: not a path"));
+    }
+    List<str> parts = [];
+    for (str raw in raw_path.split("/")) {
+        if (raw == "") {
+            continue;
+        }
+        str seg = decode_segment(raw)?;
+        if (seg == ".") {
+            continue;
+        }
+        if (seg == "..") {
+            return Result<List<str>, Refusal>.Err(Refusal(400, "400 Bad Request: a path may not climb"));
+        }
+        parts.push(seg);
+        if (parts.size() > MAX_DEPTH) {
+            return Result<List<str>, Refusal>.Err(Refusal(414, "414 URI Too Long"));
+        }
+    }
+    return Result<List<str>, Refusal>.Ok(parts);
+}
+
+// The thing at `parts` below the root, if it may be served at all.
+Result<Located, Refusal> locate(Site site, List<str> parts) {
+    str path = site.root;
+    for (str seg in parts) {
+        if (!site.dotfiles && seg.starts_with(".")) {
+            return Result<Located, Refusal>.Err(Refusal(404, "404 Not Found"));
+        }
+        path = fs.join(path, seg);
+        if (fs.is_link(path)) {
+            return Result<Located, Refusal>.Err(Refusal(403, "403 Forbidden: symbolic links are not served"));
+        }
+    }
+    match (fs.stat(path)) {
+        case Ok(fs.Stat found): {
+            return Result<Located, Refusal>.Ok(Located(path, found, parts));
+        }
+        case Err(io.Error error): {
+            return Result<Located, Refusal>.Err(refusal_of(error));
+        }
+    }
+}
+
+// --- types, dates, validators -----------------------------------------------------
+str extension_of(str path) {
+    List<str> pieces = path.split("/");
+    str name = pieces[pieces.size() - 1];
+    List<str> dots = name.split(".");
+    // `.profile` has no extension; `a.` has an empty one.
+    if (dots.size() < 2 || dots[0] == "") {
+        return "";
+    }
+    return dots[dots.size() - 1].to_lower();
+}
+
+/// The `Content-Type` a file named `path` is sent with.
+pub str type_of(str path) {
+    match (MIME.get(extension_of(path))) {
+        case Some(str kind): {
+            return kind;
+        }
+        case None: {
+            return "application/octet-stream";
+        }
+    }
+}
+
+int seconds_of(fs.Stat st) {
+    int secs = st.mtime_ns / 1000000000;
+    if (st.mtime_ns < 0 && st.mtime_ns % 1000000000 != 0) {
+        secs = secs - 1;
+    }
+    if (secs < FIRST_DAY) {
+        return FIRST_DAY;
+    }
+    if (secs > LAST_DAY) {
+        return LAST_DAY;
+    }
+    return secs;
+}
+
+str etag_of(fs.Stat st) {
+    return "\"" + st.mtime_ns.to_str() + "-" + st.size.to_str() + "\"";
+}
+
+bool all_digits(str s) {
+    if (s == "") {
+        return false;
+    }
+    for (int c in s.to_bytes()) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `Sun, 06 Nov 1994 08:49:37 GMT` as seconds since 1970; nothing for any other spelling.
+Option<int> parse_http_date(str raw) {
+    List<str> words = raw.trim().split(" ");
+    if (words.size() != 6 || words[5] != "GMT" || words[0].size() != 4 || !words[0].ends_with(",")) {
+        return Option<int>.None;
+    }
+    if (!all_digits(words[1]) || words[1].size() != 2 || !all_digits(words[3]) || words[3].size() != 4) {
+        return Option<int>.None;
+    }
+    int month = 0;
+    match (MONTHS.index_of(words[2])) {
+        case Some(int at): {
+            month = at + 1;
+        }
+        case None: {
+            return Option<int>.None;
+        }
+    }
+    List<str> clock = words[4].split(":");
+    if (clock.size() != 3) {
+        return Option<int>.None;
+    }
+    for (str piece in clock) {
+        if (!all_digits(piece) || piece.size() != 2) {
+            return Option<int>.None;
+        }
+    }
+    int day = words[1].parse_int().or(0);
+    int year = words[3].parse_int().or(0);
+    int hour = clock[0].parse_int().or(0);
+    int minute = clock[1].parse_int().or(0);
+    int second = clock[2].parse_int().or(0);
+    match (date.epoch(year, month, day, hour: hour, minute: minute, second: second)) {
+        case Ok(int when): {
+            return Option<int>.Some(when);
+        }
+        case Err(_): {
+            return Option<int>.None;
+        }
+    }
+}
+
+// Whether `header`, a comma-separated list of entity tags (or `*`), names `etag`.
+// `weak` ignores a leading `W/` on either side, which is the comparison
+// If-None-Match uses; If-Match and If-Range want the strong one.
+bool etag_listed(str header, str etag, bool weak) {
+    if (header.size() > MAX_FIELD) {
+        return false;
+    }
+    for (str item in header.split(",")) {
+        str tag = item.trim();
+        if (tag == "*") {
+            return true;
+        }
+        if (weak && tag.starts_with("W/")) {
+            tag = tag.substr(2, tag.size());
+        }
+        if (tag == etag) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- ranges ---------------------------------------------------------------------------
+// What a Range header asks of a file `size` bytes long: [0] to ignore it, or
+// [1, first, last] for one satisfiable range, or [2] when nothing in the file
+// is asked for.
+List<int> parse_range(str header, int size) {
+    List<int> ignore = [0];
+    if (header.size() > MAX_FIELD) {
+        return ignore;
+    }
+    str spec = header.trim();
+    if (spec.size() < 6 || spec.substr(0, 6).to_lower() != "bytes=") {
+        return ignore;
+    }
+    spec = spec.substr(6, spec.size()).trim();
+    if (spec.contains(",")) {
+        return ignore;
+    }
+    match (spec.index_of("-")) {
+        case None: {
+            return ignore;
+        }
+        case Some(int dash): {
+            str from = spec.substr(0, dash).trim();
+            str to = spec.substr(dash + 1, spec.size()).trim();
+            if (from == "") {
+                // `-N`: the last N bytes.
+                if (!all_digits(to)) {
+                    return ignore;
+                }
+                int n = to.parse_int().or(-1);
+                if (n < 0) {
+                    return ignore;
+                }
+                if (n == 0 || size == 0) {
+                    return [2];
+                }
+                if (n > size) {
+                    n = size;
+                }
+                return [1, size - n, size - 1];
+            }
+            if (!all_digits(from)) {
+                return ignore;
+            }
+            int first = from.parse_int().or(-1);
+            if (first < 0) {
+                return ignore;
+            }
+            int last = size - 1;
+            if (to != "") {
+                if (!all_digits(to)) {
+                    return ignore;
+                }
+                int asked = to.parse_int().or(-1);
+                if (asked < 0 || asked < first) {
+                    return ignore;
+                }
+                if (asked < last) {
+                    last = asked;
+                }
+            }
+            if (first >= size) {
+                return [2];
+            }
+            return [1, first, last];
+        }
+    }
+}
+
+// --- a file ----------------------------------------------------------------------------
+void validators(http.Response response, Site site, fs.Stat st) {
+    response.set("etag", etag_of(st));
+    response.set("last-modified", date.http_date(seconds_of(st)));
+    if (site.cache > 0) {
+        response.set("cache-control", "public, max-age=" + site.cache.to_str());
+    } else {
+        response.set("cache-control", "no-cache");
+    }
+}
+
+Result<io.File, Refusal> open_file(str path) {
+    match (io.open(path)) {
+        case Ok(io.File file): {
+            return Result<io.File, Refusal>.Ok(file);
+        }
+        case Err(io.Error error): {
+            return Result<io.File, Refusal>.Err(refusal_of(error));
+        }
+    }
+}
+
+Result<Answer, Refusal> serve_file(http.Request req, Site site, str path, fs.Stat st) {
+    io.File file = open_file(path)?;
+    bool is_get = req.method() == "GET";
+    int secs = seconds_of(st);
+    str etag = etag_of(st);
+    // RFC 9110 §13.2.2: If-Match, else If-Unmodified-Since.
+    match (req.header("if-match")) {
+        case Some(str listed): {
+            if (!etag_listed(listed, etag, false)) {
+                return refuse(412, "412 Precondition Failed");
+            }
+        }
+        case None: {
+            match (req.header("if-unmodified-since")) {
+                case Some(str stamp): {
+                    match (parse_http_date(stamp)) {
+                        case Some(int then): {
+                            if (secs > then) {
+                                return refuse(412, "412 Precondition Failed");
+                            }
+                        }
+                        case None: {
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    // Then If-None-Match, else If-Modified-Since: 304 for GET and HEAD.
+    bool unchanged = false;
+    match (req.header("if-none-match")) {
+        case Some(str listed): {
+            unchanged = etag_listed(listed, etag, true);
+        }
+        case None: {
+            match (req.header("if-modified-since")) {
+                case Some(str stamp): {
+                    match (parse_http_date(stamp)) {
+                        case Some(int then): {
+                            unchanged = secs <= then;
+                        }
+                        case None: {
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    if (unchanged) {
+        http.Response not_modified = http.response(304);
+        validators(not_modified, site, st);
+        not_modified.set("x-content-type-options", "nosniff");
+        return Result<Answer, Refusal>.Ok(Answer(not_modified));
+    }
+    // Then Range, on GET only, unless If-Range says the file is not the one the
+    // client's partial copy came from.
+    int first = 0;
+    int length = st.size;
+    bool partial = false;
+    bool applies = is_get;
+    match (req.header("if-range")) {
+        case Some(str condition): {
+            str wanted = condition.trim();
+            if (wanted.starts_with("\"") || wanted.starts_with("W/")) {
+                applies = applies && wanted == etag;
+            } else {
+                match (parse_http_date(wanted)) {
+                    case Some(int then): {
+                        applies = applies && then == secs;
+                    }
+                    case None: {
+                        applies = false;
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    if (applies) {
+        match (req.header("range")) {
+            case Some(str asked): {
+                List<int> got = parse_range(asked, st.size);
+                if (got[0] == 2) {
+                    http.Response unsatisfiable = http.text_response("416 Range Not Satisfiable\n", status: 416);
+                    unsatisfiable.set("content-range", "bytes */" + st.size.to_str());
+                    unsatisfiable.set("x-content-type-options", "nosniff");
+                    return Result<Answer, Refusal>.Ok(Answer(unsatisfiable));
+                }
+                if (got[0] == 1) {
+                    partial = true;
+                    first = got[1];
+                    length = got[2] - got[1] + 1;
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    http.Response response = http.response(200);
+    if (partial) {
+        response = http.response(206);
+        response.set("content-range", "bytes " + first.to_str() + "-" + (first + length - 1).to_str() + "/" + st.size.to_str());
+    }
+    response.set("content-type", type_of(path));
+    response.set("accept-ranges", "bytes");
+    response.set("x-content-type-options", "nosniff");
+    validators(response, site, st);
+    return Result<Answer, Refusal>.Ok(Answer(response, file: Option<io.File>.Some(file), skip: first, length: length));
+}
+
+// --- a directory ---------------------------------------------------------------------
+// The URL of a directory, rebuilt from its checked pieces, so that nothing the
+// client wrote in the path (a leading `//`, say, which a browser reads as another
+// host) can end up in a redirect.
+str url_of(List<str> parts, str query) {
+    List<str> pieces = [];
+    for (str seg in parts) {
+        pieces.push(http.quote(seg, safe: ""));
+    }
+    str url = "/" + pieces.join("/");
+    if (parts.size() > 0) {
+        url = url + "/";
+    }
+    if (query != "") {
+        url = url + "?" + query;
+    }
+    return url;
+}
+
+bool wants_json(http.Request req, str query) {
+    for (str pair in query.split("&")) {
+        if (pair == "json" || pair.starts_with("json=") || pair == "format=json") {
+            return true;
+        }
+    }
+    match (req.header("accept")) {
+        case Some(str accept): {
+            str wanted = accept.to_lower();
+            return wanted.contains("application/json") && !wanted.contains("text/html");
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+type Entry {
+    str name;
+    bool is_dir;
+    int size;
+    int mtime;
+}
+
+// The entries of `dir` that a request could reach, directories first.
+Result<List<Entry>, Refusal> entries_of(Site site, str dir) {
+    List<str> names = [];
+    match (fs.listdir(dir)) {
+        case Ok(List<str> found): {
+            names = found;
+        }
+        case Err(io.Error error): {
+            return Result<List<Entry>, Refusal>.Err(refusal_of(error));
+        }
+    }
+    List<Entry> folders = [];
+    List<Entry> files = [];
+    int seen = 0;
+    for (str name in names) {
+        if (!site.dotfiles && name.starts_with(".")) {
+            continue;
+        }
+        str path = fs.join(dir, name);
+        if (fs.is_link(path)) {
+            continue;
+        }
+        match (fs.stat(path)) {
+            case Ok(fs.Stat found): {
+                if (found.is_dir()) {
+                    folders.push(Entry(name, true, 0, seconds_of(found)));
+                } else if (found.is_file()) {
+                    files.push(Entry(name, false, found.size, seconds_of(found)));
+                }
+            }
+            case Err(_): {
+            }
+        }
+        seen = seen + 1;
+        if (seen >= MAX_LISTING) {
+            break;
+        }
+    }
+    for (Entry file in files) {
+        folders.push(file);
+    }
+    return Result<List<Entry>, Refusal>.Ok(folders);
+}
+
+Result<Answer, Refusal> listing_of(http.Request req, Site site, Located at, str query) {
+    bool truncated = false;
+    List<Entry> entries = entries_of(site, at.path)?;
+    if (entries.size() >= MAX_LISTING) {
+        truncated = true;
+    }
+    str shown = "/" + at.parts.join("/");
+    if (at.parts.size() > 0) {
+        shown = shown + "/";
+    }
+    http.Response response = http.response(200);
+    if (wants_json(req, query)) {
+        List<json.Value> rows = [];
+        for (Entry entry in entries) {
+            Map<str, json.Value> row = {};
+            row.set("name", json.Value.Str(entry.name));
+            if (entry.is_dir) {
+                row.set("type", json.Value.Str("dir"));
+            } else {
+                row.set("type", json.Value.Str("file"));
+                row.set("size", json.Value.Int(entry.size));
+            }
+            row.set("mtime", json.Value.Str(date.iso(entry.mtime)));
+            rows.push(json.Value.Object(row));
+        }
+        Map<str, json.Value> top = {};
+        top.set("path", json.Value.Str(shown));
+        top.set("entries", json.Value.Array(rows));
+        top.set("truncated", json.Value.Bool(truncated));
+        match (json.stringify(json.Value.Object(top))) {
+            case Ok(str text): {
+                response.set_body((text + "\n").to_bytes());
+            }
+            case Err(_): {
+                return refuse(500, "500 Internal Server Error");
+            }
+        }
+        response.set("content-type", "application/json; charset=utf-8");
+    } else {
+        List<str> page = [];
+        page.push("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Index of " + html.escape(shown) + "</title>");
+        page.push("<style>body{font:16px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:48rem;padding:0 1rem}li{list-style:none}.s{color:#666;float:right}</style></head><body>");
+        page.push("<h1>Index of " + html.escape(shown) + "</h1>\n<ul>\n");
+        if (at.parts.size() > 0) {
+            page.push("<li><a href=\"../\">../</a></li>\n");
+        }
+        for (Entry entry in entries) {
+            // `./` first: a name like `a:b` would otherwise read as a scheme.
+            str link = "./" + http.quote(entry.name, safe: "");
+            str label = html.escape(entry.name);
+            if (entry.is_dir) {
+                link = link + "/";
+                label = label + "/";
+                page.push("<li><a href=\"" + link + "\">" + label + "</a></li>\n");
+            } else {
+                page.push("<li><a href=\"" + link + "\">" + label + "</a><span class=\"s\">" + entry.size.to_str() + "</span></li>\n");
+            }
+        }
+        page.push("</ul>\n");
+        if (truncated) {
+            page.push("<p>Only the first " + MAX_LISTING.to_str() + " entries are shown.</p>\n");
+        }
+        page.push("</body></html>\n");
+        response.set_body(page.join("").to_bytes());
+        response.set("content-type", "text/html; charset=utf-8");
+        response.set("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'");
+    }
+    response.set("cache-control", "no-cache");
+    response.set("vary", "Accept");
+    response.set("x-content-type-options", "nosniff");
+    return Result<Answer, Refusal>.Ok(Answer(response));
+}
+
+Result<Answer, Refusal> serve_directory(http.Request req, Site site, Located at, str raw_path, str query) {
+    if (!raw_path.ends_with("/")) {
+        http.Response moved = http.text_response("301 Moved Permanently\n", status: 301);
+        moved.set("location", url_of(at.parts, query));
+        moved.set("x-content-type-options", "nosniff");
+        return Result<Answer, Refusal>.Ok(Answer(moved));
+    }
+    str index_path = fs.join(at.path, site.index);
+    if (!fs.is_link(index_path)) {
+        match (fs.stat(index_path)) {
+            case Ok(fs.Stat found): {
+                if (found.is_file()) {
+                    return serve_file(req, site, index_path, found);
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    if (site.listing) {
+        return listing_of(req, site, at, query);
+    }
+    return refuse(403, "403 Forbidden: no index file and directory listing is off");
+}
+
+// --- one request -----------------------------------------------------------------------
+Result<Answer, Refusal> route(http.Request req, Site site) {
+    str method = req.method();
+    if (method != "GET" && method != "HEAD") {
+        return refuse(405, "405 Method Not Allowed");
+    }
+    str target = req.url().target();
+    str raw_path = target;
+    str query = "";
+    match (target.index_of("?")) {
+        case Some(int mark): {
+            raw_path = target.substr(0, mark);
+            query = target.substr(mark + 1, target.size());
+        }
+        case None: {
+        }
+    }
+    List<str> parts = split_path(raw_path)?;
+    Located at = locate(site, parts)?;
+    if (at.stat.is_dir()) {
+        return serve_directory(req, site, at, raw_path, query);
+    }
+    if (at.stat.is_file() && !raw_path.ends_with("/")) {
+        return serve_file(req, site, at.path, at.stat);
+    }
+    return refuse(404, "404 Not Found");
+}
+
+Answer respond(http.Request req, Site site) {
+    if (req.method() == "OPTIONS") {
+        http.Response allowed = http.response(204);
+        allowed.set("allow", ALLOW);
+        return Answer(allowed);
+    }
+    match (route(req, site)) {
+        case Ok(Answer answer): {
+            return answer;
+        }
+        case Err(Refusal refusal): {
+            return failed(refusal);
+        }
+    }
+}
+
+// --- writing --------------------------------------------------------------------------
+bool clean(str value) {
+    for (int c in value.to_bytes()) {
+        if ((c < 32 && c != 9) || c == 127) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A status line and fields for a response whose body this module writes.
+bytes head_of(http.Response response, bool old_client, int length, bool keep) {
+    List<str> lines = ["HTTP/1.1 " + response.status().to_str() + " " + response.reason()];
+    for (str name in response.header_names()) {
+        match (response.header(name)) {
+            case Some(str value): {
+                if (clean(value)) {
+                    lines.push(name + ": " + value);
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    lines.push("content-length: " + length.to_str());
+    if (!keep) {
+        lines.push("connection: close");
+    } else if (old_client) {
+        lines.push("connection: keep-alive");
+    }
+    return (lines.join("\r\n") + "\r\n\r\n").to_bytes();
+}
+
+bool write_all(io.Stream stream, bytes data) {
+    match (stream.write(data)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// The next piece of `file`, at most `want` bytes; empty when the file ended.
+bytes next_piece(io.File file, int want) {
+    int take = want;
+    if (take > CHUNK) {
+        take = CHUNK;
+    }
+    match (file.read(take)) {
+        case Ok(bytes got): {
+            return got;
+        }
+        case Err(_): {
+            bytes none = [];
+            return none;
+        }
+    }
+}
+
+// Send `head`, then -- for a GET -- `length` bytes of `file` after the first
+// `skip`, in pieces. The first piece goes out with the head in one write, so a
+// small file is one packet and a Nagle/delayed-ACK stall has nothing to wait
+// for. False when the connection cannot be used afterwards: the peer went, or
+// the file turned out shorter than its size said.
+bool send_file(io.Stream stream, bytes head, io.File file, int skip, int length, bool with_body) {
+    if (!with_body || length == 0) {
+        return write_all(stream, head);
+    }
+    int to_skip = skip;
+    while (to_skip > 0) {
+        bytes dropped = next_piece(file, to_skip);
+        if (dropped.size() == 0) {
+            return false;
+        }
+        to_skip = to_skip - dropped.size();
+    }
+    int left = length;
+    bool first = true;
+    while (left > 0) {
+        bytes piece = next_piece(file, left);
+        if (piece.size() == 0) {
+            return false;
+        }
+        left = left - piece.size();
+        if (first) {
+            head.extend(piece);
+            first = false;
+            if (!write_all(stream, head)) {
+                return false;
+            }
+        } else if (!write_all(stream, piece)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Write `answer`; false when the connection is no good afterwards.
+bool deliver(io.Stream stream, http.Request req, Answer answer, bool keep) {
+    match (answer.file) {
+        case Some(io.File file): {
+            bytes head = head_of(answer.response, req.version() == "1.0", answer.length, keep);
+            return send_file(stream, head, file, answer.skip, answer.length, req.method() == "GET");
+        }
+        case None: {
+            match (http.write_response(stream, req, answer.response, keep)) {
+                case Ok: {
+                    return true;
+                }
+                case Err(_): {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+// Whether a request the parser refused is answered (with its 400 or 431) or
+// just dropped (a connection that is already gone).
+bool answerable(http.Error error) {
+    match (error) {
+        case Syntax: {
+            return true;
+        }
+        case Framing: {
+            return true;
+        }
+        case TooLarge: {
+            return true;
+        }
+        case BadUrl: {
+            return true;
+        }
+        case Other: {
+            return true;
+        }
+        case Closed: {
+            return false;
+        }
+        case Refused: {
+            return false;
+        }
+        case TimedOut: {
+            return false;
+        }
+        case Unreachable: {
+            return false;
+        }
+        case Reset: {
+            return false;
+        }
+        case InUse: {
+            return false;
+        }
+        case NameNotFound: {
+            return false;
+        }
+        case CertificateUntrusted: {
+            return false;
+        }
+        case CertificateExpired: {
+            return false;
+        }
+        case HostnameMismatch: {
+            return false;
+        }
+        case TlsFailed: {
+            return false;
+        }
+        case InsecureRedirect: {
+            return false;
+        }
+        case SchemeNeedsTls: {
+            return false;
+        }
+    }
+}
+
+// The answer to a request that could not be read, and the end of the
+// connection: the framing of whatever follows it can no longer be trusted.
+void refuse_unreadable(io.Stream stream, http.Error error) {
+    if (!answerable(error)) {
+        return;
+    }
+    http.Response refusal = http.text_response(error.to_str() + "\n", status: error.status());
+    refusal.set("connection", "close");
+    bytes head = head_of(refusal, false, refusal.body().size(), false);
+    head.extend(refusal.body());
+    bool sent = write_all(stream, head);
+}
+
+/// Serve requests on `stream` until the peer stops, either side says `close`,
+/// or `http.MAX_REQUESTS` have been answered. The number answered.
+///
+/// A stream that cannot be read or written ends the loop quietly, as
+/// `http.serve_stream` does; a request that cannot be parsed is answered with
+/// its 400 or 431 first.
+pub int serve(io.Stream stream, Site site) {
+    io.Stream guarded = guard(stream);
+    int served = 0;
+    while (served < http.MAX_REQUESTS) {
+        match (http.read_request(guarded)) {
+            case Ok(Option<http.Request> maybe): {
+                match (maybe) {
+                    case None: {
+                        return served;
+                    }
+                    case Some(http.Request request): {
+                        Answer answer = respond(request, site);
+                        answer.response.set("date", date.http_date(date.now()));
+                        bool again = http.should_keep_alive(request, answer.response) && served + 1 < http.MAX_REQUESTS;
+                        bool sent = deliver(guarded, request, answer, again);
+                        served = served + 1;
+                        if (!sent || !again) {
+                            return served;
+                        }
+                    }
+                }
+            }
+            case Err(http.Error error): {
+                refuse_unreadable(guarded, error);
+                return served;
+            }
+        }
+    }
+    return served;
+}
