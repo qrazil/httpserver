@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for `httpserver --root DIR` (static file serving).
 #
-#   M31_ROOT=/path/to/m31 bash scripts/test_static.sh [oracle|fuzz|stream|https|cli]...
+#   M31_ROOT=/path/to/m31 bash tests/test_static.sh [oracle|fuzz|stream|https|cli]...
 #
 # Builds ./httpserver unless HTTPSERVER_BIN points at one. Every check runs
 # against a real server on a loopback port with a disposable tree (see
@@ -10,7 +10,7 @@
 # GNU-only flags; the logic lives in Python 3's standard library.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-SCRIPTS=$(pwd)/scripts
+TESTS=$(pwd)/tests
 export PYTHONDONTWRITEBYTECODE=1
 
 WORK=$(mktemp -d)
@@ -70,7 +70,7 @@ stop() { kill "$1" >/dev/null 2>&1; wait "$1" 2>/dev/null; }
 run_py() {
     local name=$1
     shift
-    (cd "$SCRIPTS" && python3 "$@") >"$WORK/$name.out" 2>&1
+    (cd "$TESTS" && python3 "$@") >"$WORK/$name.out" 2>&1
     local rc=$?
     grep -v '^py-summary' "$WORK/$name.out" | grep -v '^ok ' | sed 's/^/  /' | head -60
     local ok_n fail_n
@@ -95,7 +95,7 @@ GROUPS_WANTED="$*"
 BIGMIB=${STATIC_BIG_MIB:-64}
 OUTER=$WORK/outer
 ROOT=$OUTER/root
-python3 scripts/static_fixture.py "$OUTER" "$BIGMIB" || { bad "fixture"; exit 1; }
+python3 tests/static_fixture.py "$OUTER" "$BIGMIB" || { bad "fixture"; exit 1; }
 note "fixture: $(ls "$ROOT" | wc -l | tr -d ' ') entries, ${BIGMIB} MiB big.bin"
 
 # --- the CLI ------------------------------------------------------------

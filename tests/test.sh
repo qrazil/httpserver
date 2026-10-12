@@ -4,9 +4,9 @@
 # small Python client (threads, real `socket`s, nothing mocked) for the
 # concurrent-load check, which is the one this whole app exists to pass.
 #
-#   M31_ROOT=/path/to/m31 bash test.sh
+#   M31_ROOT=/path/to/m31 bash tests/test.sh
 #
-# See build.sh's own header for what M31_ROOT (and LANGC, if the compiler
+# See scripts/build.sh's own header for what M31_ROOT (and LANGC, if the compiler
 # isn't at $M31_ROOT's own default) need to point at.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -197,7 +197,7 @@ fi
 # --- 6. https: --tls-cert / --tls-key ---------------------------------------
 # A throwaway CA and localhost leaves made with openssl; clients are curl
 # (--cacert), the standard library's own `https` client with
-# `tls.Trust.CaFile` (scripts/https_client.m31), and Python's ssl. The https
+# `tls.Trust.CaFile` (tests/https_client.m31), and Python's ssl. The https
 # servers listen on `localhost`, not 127.0.0.1: the m31 client resolves a
 # name to the first address the resolver gives it and cannot match an IP
 # literal against a certificate, and server and client resolve `localhost`
@@ -514,10 +514,10 @@ else:
 PY
     tls_client() { python3 "$WORK/https_checks.py" "$@"; }
     HCLIENT_BUILT=0
-    if SRC=scripts/https_client.m31 OUT="$WORK/https_client" bash scripts/build.sh >"$WORK/https_client.log" 2>&1; then
+    if SRC=tests/https_client.m31 OUT="$WORK/https_client" bash scripts/build.sh >"$WORK/https_client.log" 2>&1; then
         HCLIENT_BUILT=1
     else
-        bad "build scripts/https_client.m31" "$(tail -5 "$WORK/https_client.log")"
+        bad "build tests/https_client.m31" "$(tail -5 "$WORK/https_client.log")"
     fi
 
     # -- an Ed25519 server: curl, keep-alive, python ----------------------------
@@ -789,10 +789,10 @@ PY
     fi
 fi
 
-# --- 8. static file serving: its own suite (scripts/test_static.sh) -------------
+# --- 8. static file serving: its own suite (tests/test_static.sh) -------------
 
 static_log="$WORK/static.log"
-HTTPSERVER_BIN="$BIN" bash scripts/test_static.sh >"$static_log" 2>&1
+HTTPSERVER_BIN="$BIN" bash tests/test_static.sh >"$static_log" 2>&1
 static_rc=$?
 cat "$static_log"
 static_line=$(grep '^static: ' "$static_log" | tail -1)

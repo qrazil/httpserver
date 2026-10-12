@@ -29,7 +29,7 @@ What this says, and does not:
 - On one big file both are limited by the loopback and the page cache; Python
   is about 15 % faster per stream (it copies in larger blocks), `httpserver`
   moves the file in 64 KiB pieces and its RSS stays at 6 MB however big the
-  file is (the streaming test in `scripts/test_static.sh` checks that).
+  file is (the streaming test in `tests/test_static.sh` checks that).
 - Over https the bottleneck is the pure-m31 TLS stack, not the file server:
   about 3 MB/s for one stream in the test suite. Not benchmarked against
   anything.

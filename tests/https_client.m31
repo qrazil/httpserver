@@ -1,4 +1,4 @@
-// A test client for scripts/test.sh: one https GET through the standard
+// A test client for tests/test.sh: one https GET through the standard
 // library's own client, trusting only the CA file it is given.
 //
 //   https_client URL CA_FILE

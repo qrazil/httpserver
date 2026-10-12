@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build httpserver into ./httpserver.
 #
-#   M31_ROOT=/path/to/m31 bash build.sh          -O2, warnings are errors
-#   M31_ROOT=/path/to/m31 CC=clang bash build.sh
-#   SRC=other.m31 OUT=other bash build.sh         any other one-file program
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh          -O2, warnings are errors
+#   M31_ROOT=/path/to/m31 CC=clang bash scripts/build.sh
+#   SRC=other.m31 OUT=other bash scripts/build.sh         any other one-file program
 #
 # This app is one `.m31` file, compiled by the m31 compiler (m31c) and then
 # linked, as ordinary C, against the m31 RUNTIME's own source files

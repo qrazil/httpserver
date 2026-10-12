@@ -47,7 +47,7 @@ jobs:
         run: '"$LANGC" fmt --check -r .'
 
       - name: Build and test
-        run: bash scripts/test.sh
+        run: bash tests/test.sh
 
   test-linux-aarch64:
     name: Test — Linux aarch64
@@ -70,7 +70,7 @@ jobs:
         run: '"$LANGC" fmt --check -r .'
 
       - name: Build and test
-        run: bash scripts/test.sh
+        run: bash tests/test.sh
 
   test-macos-arm64:
     name: Test — macOS (arm64)
@@ -101,4 +101,4 @@ jobs:
         run: '"$LANGC" fmt --check -r .'
 
       - name: Build and test
-        run: bash scripts/test.sh
+        run: bash tests/test.sh

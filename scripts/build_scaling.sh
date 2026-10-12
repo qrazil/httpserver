@@ -5,9 +5,9 @@
 # use by SCALING.md's ramping concurrency test. The shipped build.sh/
 # ./httpserver binary used for BENCHMARK.md is untouched by this script.
 #
-#   M31_ROOT=/path/to/m31 bash build_scaling.sh
+#   M31_ROOT=/path/to/m31 bash scripts/build_scaling.sh
 #
-# See build.sh's own header for what M31_ROOT/LANGC need to point at.
+# See scripts/build.sh's own header for what M31_ROOT/LANGC need to point at.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
