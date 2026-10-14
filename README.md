@@ -27,6 +27,14 @@ today (`prim`s cover sockets, files and the clock, not the process
 environment), and `lib/args` already gives a `--port`/`--host` pair the usual
 shell idioms (`httpserver --port "${PORT:-8080}"`) work with anyway.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/qrazil/httpserver/master/install.sh | sh
+```
+
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/httpserver/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
+
 ## Serving https
 
     httpserver --tls-cert chain.pem --tls-key key.pem --port 8443
