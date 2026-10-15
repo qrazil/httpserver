@@ -35,6 +35,8 @@ curl -fsSL https://raw.githubusercontent.com/qrazil/httpserver/master/install.sh
 
 Picks the release for your OS and CPU, unpacks it under `~/.local/opt/httpserver/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
 
+On Alpine (musl) the installer picks the `-musl` Linux asset built by `scripts/ci-musl.sh`; `LIBC=gnu|musl` overrides detection, and a release without a musl asset falls back to the glibc one.
+
 ## Serving https
 
     httpserver --tls-cert chain.pem --tls-key key.pem --port 8443
