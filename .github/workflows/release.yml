@@ -12,9 +12,9 @@ name: Release
 # test.yml is a hard precondition, exactly as qrazil/m31's own release.yml
 # treats its gates job: a broken build must never produce a release.
 env:
-  M31_REF: v0.5.0
+  M31_REF: v0.6.0
   # m31 release whose musl tarball builds the Alpine assets (scripts/ci-musl.sh).
-  M31_MUSL_REF: v0.5.0
+  M31_MUSL_REF: v0.6.0
 
 on:
   push:

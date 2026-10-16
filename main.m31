@@ -251,7 +251,7 @@ void serve_tls(net.Listener listener, str chain_path, str key_path, int workers,
 }
 
 // Keep in step with `version` in the `deps` file.
-const str VERSION = "0.6.0";
+const str VERSION = "0.7.0";
 
 args.Parser cli = args.Parser("httpserver", summary: "a \"Hello, World!\" HTTP server, one green thread per connection, or a static file server with --root");
 cli.version = VERSION;
