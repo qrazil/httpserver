@@ -804,6 +804,20 @@ if [ "$static_rc" != 0 ] && [ "${static_fail:-0}" = 0 ]; then
     bad "static suite" "exit $static_rc, no summary line"
 fi
 
+# --- 9. the command line: its own suite (tests/test_cli.sh) ---------------------
+
+cli_log="$WORK/cli.log"
+HTTPSERVER_BIN="$BIN" bash tests/test_cli.sh >"$cli_log" 2>&1
+cli_rc=$?
+cat "$cli_log"
+cli_line=$(grep ' passed, ' "$cli_log" | tail -1)
+pass=$((pass + $(printf '%s' "$cli_line" | awk '{print $1+0}')))
+cli_fail=$(printf '%s' "$cli_line" | awk '{print $3+0}')
+fail=$((fail + cli_fail))
+if [ "$cli_rc" != 0 ] && [ "$cli_fail" = 0 ]; then
+    bad "cli suite" "exit $cli_rc, no summary line"
+fi
+
 # --- summary ------------------------------------------------------------
 
 echo

@@ -14,18 +14,45 @@ a correct `Content-Length`, body `Hello, World!\n`.
     bash tests/test.sh                 # the tests
 
     httpserver                         listen on 0.0.0.0:8080
-    httpserver --port 9000             listen on 0.0.0.0:9000
+    httpserver --port 9000             listen on 0.0.0.0:9000      (--p 9000, --port=9000)
     httpserver --host 127.0.0.1        listen on a specific address only
     httpserver --tls-cert chain.pem --tls-key key.pem
                                        serve https instead of http
-    httpserver --root ./public         serve the files under ./public
-    httpserver --help
+    httpserver --root ./public         serve the files under ./public   (--r)
+    httpserver --help                  every option, generated; --version; --completions SHELL
 
-Port and host are command-line flags, not environment variables: this
-language's standard library has no `getenv` exposed to a `.m31` program
-today (`prim`s cover sockets, files and the clock, not the process
-environment), and `lib/args` already gives a `--port`/`--host` pair the usual
-shell idioms (`httpserver --port "${PORT:-8080}"`) work with anyway.
+## Command line
+
+The grammar is Oro's `args` (`lib/args`, m31's
+[`docs/cli-conventions.md`](https://github.com/qrazil/m31/blob/master/docs/cli-conventions.md)):
+`--port 9000` and `--port=9000`, a short option is two dashes and one letter
+(`--p 9000`), `-word` would be a command (httpserver has none), `--help` is the only
+help (`-h`, `help` and a lone `--` are refused with a message that says what to
+write), and a mistyped option names the closest one. A bad command line is an error on
+standard error with the usage line and exit 2; the server exits 1 when it cannot listen
+or the certificate is unusable.
+
+| option | | default | |
+|---|---|---|---|
+| `--port PORT`, `--p` | integer 0-65535 | `8080` | `0` lets the system pick |
+| `--host HOST` | address | `0.0.0.0` | |
+| `--root DIR`, `--r` | directory | none | serve files instead of "Hello, World!" |
+| `--index NAME` | plain file name | `index.html` | needs `--root` |
+| `--listing`, `--dotfiles` | switches | off | need `--root` |
+| `--cache SECONDS` | integer >= 0 | `0` | needs `--root` |
+| `--backlog N` | integer >= 1 | `65535` | listen backlog |
+| `--tls-cert FILE`, `--tls-key FILE` | PEM files | none | both or neither |
+| `--tls-handshake-timeout-ms MS` | integer >= 1 | `5000` | https |
+| `--tls-handshake-workers N` | integer >= 1 | `4` | https |
+| `--version` | | | `httpserver 0.6.0` |
+| `--completions SHELL` | `bash`, `zsh`, `fish` | | prints a completion script |
+
+Port and host are options, not environment variables: `httpserver --port "${PORT:-8080}"`
+is the idiom. Shell completion, generated from the same table:
+
+    httpserver --completions bash > ~/.local/share/bash-completion/completions/httpserver
+    httpserver --completions fish > ~/.config/fish/completions/httpserver.fish
+    httpserver --completions zsh  > "${fpath[1]}/_httpserver"
 
 ## Install
 
@@ -33,7 +60,7 @@ shell idioms (`httpserver --port "${PORT:-8080}"`) work with anyway.
 curl -fsSL https://raw.githubusercontent.com/qrazil/httpserver/master/install.sh | sh
 ```
 
-Picks the release for your OS and CPU, unpacks it under `~/.local/opt/httpserver/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/httpserver/<version>` and links the programs into `~/.local/bin`. `--release v1.2.3` (or `VERSION=v1.2.3`) pins a release, `--prefix DIR` (or `PREFIX=...`) moves the install, `--libc gnu|musl` (or `LIBC=`) overrides detection, `-uninstall` removes it, `--help` lists them; piped from curl, pass them after `-s --`: `curl -fsSL <url> | sh -s -- --prefix /usr/local`. The grammar is Oro's: a mistyped option is an error naming the closest one (exit 2).
 
 On Alpine (musl) the installer picks the `-musl` Linux asset built by `scripts/ci-musl.sh`; `LIBC=gnu|musl` overrides detection, and a release without a musl asset falls back to the glibc one.
 

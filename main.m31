@@ -5,10 +5,10 @@
 // at a time.
 //
 //   httpserver                      listen on 0.0.0.0:8080
-//   httpserver --port 9000          listen on 0.0.0.0:9000
+//   httpserver --port 9000          listen on 0.0.0.0:9000   (--p 9000, --port=9000)
 //   httpserver --host 127.0.0.1     listen on a specific address
 //   httpserver --tls-cert chain.pem --tls-key key.pem     serve https instead
-//   httpserver --help
+//   httpserver --help               generated; also --version and --completions bash|zsh|fish
 //
 // Why this does not just call `http.serve(ln, hello)`: that function is
 // documented (lib/net/http.m31, "One connection at a time, and why") to serve
@@ -250,9 +250,14 @@ void serve_tls(net.Listener listener, str chain_path, str key_path, int workers,
     }
 }
 
-args.Parser cli = args.Parser("httpserver", summary: "a \"Hello, World!\" HTTP server, one green thread per connection");
+// Keep in step with `version` in the `deps` file.
+const str VERSION = "0.6.0";
+
+args.Parser cli = args.Parser("httpserver", summary: "a \"Hello, World!\" HTTP server, one green thread per connection, or a static file server with --root");
+cli.version = VERSION;
+cli.epilog = "exit status: 0 never (it serves until killed), 1 cannot listen or bad certificate, 2 usage error";
 cli.value("host", help: "address to listen on", placeholder: "HOST", default: "0.0.0.0");
-cli.integer("port", help: "port to listen on", placeholder: "PORT", default: "8080");
+cli.integer("port", short: "p", help: "port to listen on", placeholder: "PORT", default: "8080");
 // 65535: deliberately more than any real deployment needs -- the OS clamps
 // this to its own configured ceiling regardless (net.listen's own doc
 // comment, lib/net.m31), so asking for more than anyone needs is how this
@@ -263,12 +268,13 @@ cli.value("tls-cert", help: "serve https: PEM certificate chain, leaf first (nee
 cli.value("tls-key", help: "serve https: PEM private key of the leaf, Ed25519 or ECDSA P-256 (needs --tls-cert)", placeholder: "FILE");
 cli.integer("tls-handshake-timeout-ms", help: "https: give up on a handshake read after this long", placeholder: "MS", default: "5000");
 cli.integer("tls-handshake-workers", help: "https: handshakes in flight at once", placeholder: "N", default: "4");
-cli.value("root", help: "serve the files under this directory instead of \"Hello, World!\"", placeholder: "DIR");
+cli.value("root", short: "r", help: "serve the files under this directory instead of \"Hello, World!\"", placeholder: "DIR");
 cli.value("index", help: "--root: the file a directory is answered with", placeholder: "NAME", default: "index.html");
 cli.flag("listing", help: "--root: list a directory that has no index file (HTML, or JSON with Accept or ?json)");
 cli.flag("dotfiles", help: "--root: serve and list names that begin with a dot (hidden by default)");
 cli.integer("cache", help: "--root: Cache-Control max-age in seconds (0: no-cache, always revalidate)", placeholder: "SECONDS", default: "0");
 cli.integer("backlog", help: "listen backlog (see lib/net.m31's own doc comment on `listen`)", placeholder: "N", default: "65535");
+cli.completions();
 List<str> argv = os.arguments();
 argv.remove_at(0);
 match (cli.parse(argv)) {
@@ -278,6 +284,22 @@ match (cli.parse(argv)) {
         os.exit(2);
     }
     case Ok(args.Parsed parsed): {
+        match (parsed.version()) {
+            case Some(str version_line): {
+                print(version_line);
+                os.exit(0);
+            }
+            case None: {
+            }
+        }
+        match (parsed.completions()) {
+            case Some(str script): {
+                print(script);
+                os.exit(0);
+            }
+            case None: {
+            }
+        }
         match (parsed.help()) {
             case Some(str help_text): {
                 print(help_text);
