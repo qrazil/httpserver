@@ -41,25 +41,41 @@ else
     BIN=./httpserver
 fi
 
-free_port() { echo $((20000 + (RANDOM % 20000))); }
+# Ask the OS for a free port (used for servers that are not ours to start).
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
 
-# start NAME HOST [flags...] -> PORT, SPID. Waits until the port accepts.
+# start NAME HOST [flags...] -> PORT, SPID. The OS picks a free port (bind to
+# 0, read it back, release it); the server is then started on it and we poll,
+# up to 30 s, until it accepts. (The server's own "listening on" line is
+# buffered when stdout is a file, so it cannot be the readiness signal.) If the
+# process dies before it accepts -- the port was taken in the gap -- retry on a
+# fresh port, up to 5 times. No fixed sleeps beyond the 50 ms poll interval.
 start() {
     local name=$1 host=$2
     shift 2
-    PORT=$(free_port)
-    "$BIN" --port "$PORT" --host "$host" "$@" >"$WORK/$name.log" 2>&1 &
-    SPID=$!
-    pids="$pids $SPID"
-    local tries=0
-    while [ "$tries" -lt 100 ]; do
-        if (exec 3<>"/dev/tcp/$host/$PORT") 2>/dev/null; then
-            exec 3>&-
-            return 0
-        fi
-        kill -0 "$SPID" 2>/dev/null || return 1
-        sleep 0.05
-        tries=$((tries + 1))
+    local attempt=0 tries
+    while [ "$attempt" -lt 5 ]; do
+        attempt=$((attempt + 1))
+        PORT=$(free_port)
+        "$BIN" --port "$PORT" --host "$host" "$@" >"$WORK/$name.log" 2>&1 &
+        SPID=$!
+        pids="$pids $SPID"
+        tries=0
+        while [ "$tries" -lt 600 ]; do
+            if ! kill -0 "$SPID" 2>/dev/null; then
+                wait "$SPID" 2>/dev/null
+                break
+            fi
+            if (exec 3<>"/dev/tcp/$host/$PORT") 2>/dev/null; then
+                exec 3>&-
+                return 0
+            fi
+            sleep 0.05
+            tries=$((tries + 1))
+        done
+        kill -0 "$SPID" 2>/dev/null && return 1 # alive but never accepted
     done
     return 1
 }
@@ -133,7 +149,7 @@ if want oracle; then
     PYPID=$!
     pids="$pids $PYPID"
     tries=0
-    while [ "$tries" -lt 100 ] && ! (exec 3<>"/dev/tcp/127.0.0.1/$PYPORT") 2>/dev/null; do sleep 0.05; tries=$((tries + 1)); done
+    while [ "$tries" -lt 600 ] && ! (exec 3<>"/dev/tcp/127.0.0.1/$PYPORT") 2>/dev/null; do sleep 0.05; tries=$((tries + 1)); done
     if start oracle 127.0.0.1 --root "$ROOT" --cache 0; then
         run_py oracle static_oracle.py "$PORT" "$PYPORT" "$ROOT"
         stop "$SPID"

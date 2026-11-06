@@ -140,7 +140,6 @@ for i in range(5):
     sock.recv(1000)
     sock.close() if i % 2 else sock.shutdown(socket.SHUT_RDWR)
     sock.close()
-time.sleep(0.2)
 r = get(port, "/mid.bin", **kw)
 check("%s: five clients that abandon a big download mid-stream; the server carries on" % kind, r and r.body == mid)
 

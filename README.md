@@ -44,7 +44,7 @@ or the certificate is unusable.
 | `--tls-cert FILE`, `--tls-key FILE` | PEM files | none | both or neither |
 | `--tls-handshake-timeout-ms MS` | integer >= 1 | `5000` | https |
 | `--tls-handshake-workers N` | integer >= 1 | `4` | https |
-| `--version` | | | `httpserver 0.6.0` |
+| `--version` | | | `httpserver 0.7.2` |
 | `--completions SHELL` | `bash`, `zsh`, `fish` | | prints a completion script |
 
 Port and host are options, not environment variables: `httpserver --port "${PORT:-8080}"`

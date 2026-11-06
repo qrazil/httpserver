@@ -6,6 +6,7 @@ import hashlib
 import os
 import socket
 import ssl
+import weakref
 import subprocess
 import sys
 
@@ -62,11 +63,16 @@ class Reply:
         return self.headers.get(name.lower())
 
 
+# Bytes read past the end of one reply belong to the next one on the same
+# connection (pipelining); keep them per socket instead of dropping them.
+_carry = weakref.WeakKeyDictionary()
+
+
 def read_reply(sock, head_only=False, keep_body=True):
     """Read one response from `sock` (a socket). Returns Reply, or None on EOF
     before any byte. Body by Content-Length only (this server sends no
     chunked bodies); `head_only` reads no body (HEAD / 304)."""
-    buf = b""
+    buf = _carry.pop(sock, b"")
     while b"\r\n\r\n" not in buf:
         chunk = sock.recv(65536)
         if not chunk:
@@ -82,7 +88,12 @@ def read_reply(sock, head_only=False, keep_body=True):
     status = int(status)
     length = int(headers.get("content-length", "0"))
     if head_only or status in (204, 304):
+        if rest:
+            _carry[sock] = rest
         return Reply(status, headers, b"", version)
+    if len(rest) > length:
+        _carry[sock] = rest[length:]
+        rest = rest[:length]
     digest_only = not keep_body
     body = b"" if digest_only else rest
     got = len(rest)

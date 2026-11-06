@@ -93,14 +93,14 @@ run --p;          expect "--p at the end" 2 "" "'--p' needs a value and is the l
 [ -z "$out" ] && note "usage errors print nothing on stdout" || bad "usage error wrote stdout" "$out"
 
 # --- every spelling starts a server -------------------------------------------------------
-PORT=$((20000 + (RANDOM % 20000)))
+PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 start() {
     "$BIN" "$@" >"$WORK/server.log" 2>&1 </dev/null &
     pid=$!
     pids="$pids $pid"
     up=0
     local tries=0
-    while [ "$tries" -lt 100 ]; do
+    while [ "$tries" -lt 600 ]; do
         if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
             exec 3>&-
             up=1

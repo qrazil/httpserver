@@ -33,7 +33,7 @@ fi
 note "build: ./httpserver"
 
 BIN=./httpserver
-PORT=$((20000 + (RANDOM % 20000)))
+PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 BASE="http://127.0.0.1:$PORT"
 
 "$BIN" --port "$PORT" --host 127.0.0.1 >"$WORK/server.log" 2>&1 &
@@ -41,7 +41,7 @@ server_pid=$!
 
 up=0
 tries=0
-while [ "$tries" -lt 100 ]; do
+while [ "$tries" -lt 600 ]; do
     if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
         exec 3>&-
         up=1
@@ -222,13 +222,13 @@ trap 'stop_https; cleanup' EXIT
 start_https() {
     local name=$1 chain=$2 key=$3
     shift 3
-    HPORT=$((20000 + (RANDOM % 20000)))
+    HPORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
     "$BIN" --port "$HPORT" --host localhost --tls-cert "$chain" --tls-key "$key" "$@" \
         >"$WORK/$name.log" 2>&1 &
     HPID=$!
     HPIDS+=("$HPID")
     local tries=0
-    while [ "$tries" -lt 100 ]; do
+    while [ "$tries" -lt 600 ]; do
         # Not the log: stdout is block-buffered into a file.
         if (exec 3<>"/dev/tcp/localhost/$HPORT") 2>/dev/null; then
             exec 3>&-
@@ -707,7 +707,7 @@ PY
         bad "https server (2 carriers) start" "$(cat "$WORK/carriers_tls.log")"
     fi
     stop_https
-    PLAIN_PORT=$((20000 + (RANDOM % 20000)))
+    PLAIN_PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
     LANG_NUM_CARRIERS=2 "$BIN" --port "$PLAIN_PORT" --host 127.0.0.1 >"$WORK/carriers_plain.log" 2>&1 &
     HPIDS+=("$!")
     sleep 0.5
@@ -722,7 +722,7 @@ PY
     refuse() { # refuse NAME EXPECTED-EXIT PATTERN args...
         local name=$1 want=$2 pattern=$3
         shift 3
-        timeout 10 "$BIN" --port "$((20000 + (RANDOM % 20000)))" --host localhost "$@" >"$WORK/refuse.out" 2>&1
+        timeout 10 "$BIN" --port "$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')" --host localhost "$@" >"$WORK/refuse.out" 2>&1
         local rc=$?
         if [ "$rc" = "$want" ] && grep -q -- "$pattern" "$WORK/refuse.out" && no_key_material "$WORK/refuse.out"; then
             note "startup refused ($name): exit $rc"
