@@ -53,7 +53,7 @@ if [ ! -x "$LANGC" ]; then
     exit 1
 fi
 
-"$LANGC" --emit-c "$SRC" -o "$W/httpserver.c" || exit 1
+"$LANGC" -emit-c "$SRC" --out "$W/httpserver.c" || exit 1
 # RT_REACTOR_C/RT_CTX_ASM (from runtime/arch.sh above) are paths relative to
 # M31_ROOT, not to this script's own directory -- prefix them before use.
 # The same flags this project's own run.sh holds the corpus to: the emitted

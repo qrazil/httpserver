@@ -1,64 +1,64 @@
-// Static file serving for httpserver: a directory tree answered over HTTP/1.1.
-//
-//   HTTP_fileserver.Site(root, index:, listing:, dotfiles:, cache:)   what to serve
-//   HTTP_fileserver.serve(stream, site)    -> int    requests answered on one connection
-//   HTTP_fileserver.guard(stream)          -> io.Stream   the stream, made safe to parse
-//
-// This is the request loop of `http.serve_stream`, written out here because
-// the standard library's `Response` holds its body as one `bytes` (and
-// `lib/net/http.m31` says so under "what is deliberately not here": a streaming
-// body). A file server must not read a gigabyte into memory to send it, so
-// anything that has a file behind it is written by this module -- the head,
-// and then the file in 64 KiB pieces, with the connection kept alive after it
-// -- and everything else (errors, listings, 304s, redirects) is an ordinary
-// `http.Response` written by `http.write_response`.
-//
+/* Static file serving for httpserver: a directory tree answered over HTTP/1.1.
+ *
+ *   HTTP_fileserver.Site(root, index:, listing:, dotfiles:, cache:)   what to serve
+ *   HTTP_fileserver.serve(stream, site)    -> int    requests answered on one connection
+ *   HTTP_fileserver.guard(stream)          -> io.Stream   the stream, made safe to parse
+ *
+ * This is the request loop of `http.serve_stream`, written out here because
+ * the standard library's `Response` holds its body as one `bytes` (and
+ * `lib/net/http.m31` says so under "what is deliberately not here": a streaming
+ * body). A file server must not read a gigabyte into memory to send it, so
+ * anything that has a file behind it is written by this module -- the head,
+ * and then the file in 64 KiB pieces, with the connection kept alive after it
+ * -- and everything else (errors, listings, 304s, redirects) is an ordinary
+ * `http.Response` written by `http.write_response`.
+ * */
 // --- what a request may reach ------------------------------------------------
-//
-// The URL path is split on `/` and each piece is percent-decoded ONCE, then
-// checked, so what the file system is asked for is exactly what was checked:
-//
-//   - a piece that decodes to something with a NUL or another control
-//     character, a `/` (so `%2f`) or a `\` is refused with 400;
-//   - a piece that decodes to `..` (so `..`, `%2e%2e`, `.%2e`) is refused with
-//     400, whatever the pieces around it are. Clients resolve `..` before
-//     they send, so a request that still has one is not an ordinary client;
-//   - a piece that decodes to `.` and an empty piece (`//`) are dropped;
-//   - decoding is not repeated: `%252e%252e` is the file name `%2e%2e`, which
-//     is looked up like any other name and is not there;
-//   - a name that begins with `.` is not served, and is answered 404 exactly
-//     as a missing one is, unless the server was started with dotfiles on;
-//   - **a symlink is never served and never followed**: every component below
-//     the root is asked about with `lstat` (`fs.is_link`) before the file
-//     system is asked for the path, and a link anywhere on it is a 403. The
-//     standard library has no `realpath` or `readlink`, so "the link points
-//     inside the tree" cannot be checked, and refusing every link is the only
-//     answer that cannot be wrong. The root itself may be reached through a
-//     link (`/tmp` on macOS is one): it is the operator's own word.
-//   - only a regular file is opened; a FIFO, socket or device is never opened.
-//
-// Between the `lstat` and the `open` there is a window in which someone who can
-// WRITE the served tree could swap a directory for a link. A tree an attacker
-// can write to is not a tree this module can protect; the README says so.
-//
+/*
+ * The URL path is split on `/` and each piece is percent-decoded ONCE, then
+ * checked, so what the file system is asked for is exactly what was checked:
+ *
+ *   - a piece that decodes to something with a NUL or another control
+ *     character, a `/` (so `%2f`) or a `\` is refused with 400;
+ *   - a piece that decodes to `..` (so `..`, `%2e%2e`, `.%2e`) is refused with
+ *     400, whatever the pieces around it are. Clients resolve `..` before
+ *     they send, so a request that still has one is not an ordinary client;
+ *   - a piece that decodes to `.` and an empty piece (`//`) are dropped;
+ *   - decoding is not repeated: `%252e%252e` is the file name `%2e%2e`, which
+ *     is looked up like any other name and is not there;
+ *   - a name that begins with `.` is not served, and is answered 404 exactly
+ *     as a missing one is, unless the server was started with dotfiles on;
+ *   - **a symlink is never served and never followed**: every component below
+ *     the root is asked about with `lstat` (`fs.is_link`) before the file
+ *     system is asked for the path, and a link anywhere on it is a 403. The
+ *     standard library has no `realpath` or `readlink`, so "the link points
+ *     inside the tree" cannot be checked, and refusing every link is the only
+ *     answer that cannot be wrong. The root itself may be reached through a
+ *     link (`/tmp` on macOS is one): it is the operator's own word.
+ *   - only a regular file is opened; a FIFO, socket or device is never opened.
+ *
+ * Between the `lstat` and the `open` there is a window in which someone who can
+ * WRITE the served tree could swap a directory for a link. A tree an attacker
+ * can write to is not a tree this module can protect; the README says so.
+ * */
 // --- what a response says ----------------------------------------------------
-//
-// `Content-Type` from the file name's extension (`MIME`), with `charset=utf-8`
-// on text; `Content-Length`; `Accept-Ranges: bytes`; a strong `ETag` made of
-// the size and the modification time to the nanosecond; `Last-Modified`;
-// `Cache-Control`; `X-Content-Type-Options: nosniff`; `Date`.
-//
-// Preconditions are RFC 9110 §13.2.2's order: If-Match, If-Unmodified-Since
-// (412); If-None-Match, If-Modified-Since (304 on GET and HEAD); then Range
-// (206, 416), honoured only on GET and only when If-Range, if there is one,
-// still matches. One range is served. A request for several ranges, a unit
-// other than `bytes`, or a Range that is not well formed is answered with the
-// whole file, which RFC 9110 §14.2 allows. Only the IMF-fixdate form of an
-// HTTP date is read; a date in the two obsolete forms is ignored, which for a
-// conditional header means the condition does not apply.
-//
-// A seek is not available (`io.File` has none), so a Range that starts at byte
-// N reads and discards N bytes first: constant memory, linear time.
+/*
+ * `Content-Type` from the file name's extension (`MIME`), with `charset=utf-8`
+ * on text; `Content-Length`; `Accept-Ranges: bytes`; a strong `ETag` made of
+ * the size and the modification time to the nanosecond; `Last-Modified`;
+ * `Cache-Control`; `X-Content-Type-Options: nosniff`; `Date`.
+ *
+ * Preconditions are RFC 9110 §13.2.2's order: If-Match, If-Unmodified-Since
+ * (412); If-None-Match, If-Modified-Since (304 on GET and HEAD); then Range
+ * (206, 416), honoured only on GET and only when If-Range, if there is one,
+ * still matches. One range is served. A request for several ranges, a unit
+ * other than `bytes`, or a Range that is not well formed is answered with the
+ * whole file, which RFC 9110 §14.2 allows. Only the IMF-fixdate form of an
+ * HTTP date is read; a date in the two obsolete forms is ignored, which for a
+ * conditional header means the condition does not apply.
+ *
+ * A seek is not available (`io.File` has none), so a Range that starts at byte
+ * N reads and discards N bytes first: constant memory, linear time. */
 
 import date;
 import fs;
@@ -116,16 +116,16 @@ pub bool is_valid_index(str name) {
 }
 
 // --- the stream, made safe to parse -------------------------------------------
-/// A stream that hands the HTTP parser nothing it cannot take.
-///
-/// m31 0.3.2's `http.read_request` TRAPS -- and a trap ends the whole process
-/// -- on a request target that is not valid UTF-8 (`GET /\xff HTTP/1.1`): the
-/// target becomes the empty string and the parser indexes into it. Every
-/// connection is another green thread of the same process, so one such request
-/// would stop the server for everybody. This wrapper changes every non-ASCII
-/// byte of a request line that is not valid UTF-8 into 0x01, which the parser
-/// refuses with a plain 400. Nothing else is touched. Delete it when the
-/// standard library no longer traps.
+/** A stream that hands the HTTP parser nothing it cannot take.
+ *
+ * m31 0.3.2's `http.read_request` TRAPS -- and a trap ends the whole process
+ * -- on a request target that is not valid UTF-8 (`GET /\xff HTTP/1.1`): the
+ * target becomes the empty string and the parser indexes into it. Every
+ * connection is another green thread of the same process, so one such request
+ * would stop the server for everybody. This wrapper changes every non-ASCII
+ * byte of a request line that is not valid UTF-8 into 0x01, which the parser
+ * refuses with a plain 400. Nothing else is touched. Delete it when the
+ * standard library no longer traps. */
 pub type Guard {
     io.Stream inner;
 }
@@ -182,16 +182,16 @@ pub io.Stream guard(io.Stream stream) {
 }
 
 // --- answers -----------------------------------------------------------------------
-// Why a request was not served: the status, and a sentence that never repeats
-// anything the client sent.
+/* Why a request was not served: the status, and a sentence that never repeats
+ * anything the client sent. */
 type Refusal {
     int status;
     str message;
 }
 
-// What goes back: a response, and -- when a file is the body -- the open file,
-// the bytes to read and discard first, and how many to send after them. A
-// response with a file has no `payload`; this module writes it.
+/* What goes back: a response, and -- when a file is the body -- the open file,
+ * the bytes to read and discard first, and how many to send after them. A
+ * response with a file has no `payload`; this module writes it. */
 type Answer {
     http.Response response;
     Option<io.File> file = Option<io.File>.None;
@@ -443,9 +443,9 @@ Option<int> parse_http_date(str raw) {
     }
 }
 
-// Whether `header`, a comma-separated list of entity tags (or `*`), names `etag`.
-// `weak` ignores a leading `W/` on either side, which is the comparison
-// If-None-Match uses; If-Match and If-Range want the strong one.
+/* Whether `header`, a comma-separated list of entity tags (or `*`), names `etag`.
+ * `weak` ignores a leading `W/` on either side, which is the comparison
+ * If-None-Match uses; If-Match and If-Range want the strong one. */
 bool is_etag_listed(str header, str etag, bool is_weak) {
     if (header.size() > MAX_FIELD) {
         return false;
@@ -466,9 +466,9 @@ bool is_etag_listed(str header, str etag, bool is_weak) {
 }
 
 // --- ranges ---------------------------------------------------------------------------
-// What a Range header asks of a file `size` bytes long: [0] to ignore it, or
-// [1, first, last] for one satisfiable range, or [2] when nothing in the file
-// is asked for.
+/* What a Range header asks of a file `size` bytes long: [0] to ignore it, or
+ * [1, first, last] for one satisfiable range, or [2] when nothing in the file
+ * is asked for. */
 List<int> parse_range(str header, int size) {
     List<int> ignore = [0];
     if (header.size() > MAX_FIELD) {
@@ -614,8 +614,8 @@ Result<Answer, Refusal> serve_file(http.Request request, Site site, str path, fs
         not_modified.set("x-content-type-options", "nosniff");
         return Result<Answer, Refusal>.Ok(Answer(not_modified));
     }
-    // Then Range, on GET only, unless If-Range says the file is not the one the
-    // client's partial copy came from.
+    /* Then Range, on GET only, unless If-Range says the file is not the one the
+     * client's partial copy came from. */
     int first = 0;
     int length = stat.size;
     bool is_partial = false;
@@ -672,9 +672,9 @@ Result<Answer, Refusal> serve_file(http.Request request, Site site, str path, fs
 }
 
 // --- a directory ---------------------------------------------------------------------
-// The URL of a directory, rebuilt from its checked pieces, so that nothing the
-// client wrote in the path (a leading `//`, say, which a browser reads as another
-// host) can end up in a redirect.
+/* The URL of a directory, rebuilt from its checked pieces, so that nothing the
+ * client wrote in the path (a leading `//`, say, which a browser reads as another
+ * host) can end up in a redirect. */
 str url_of(List<str> parts, str query) {
     List<str> pieces = [];
     for (str seg in parts) {
@@ -961,11 +961,11 @@ bytes next_piece(io.File file, int want) {
     }
 }
 
-// Send `head`, then -- for a GET -- `length` bytes of `file` after the first
-// `skip`, in pieces. The first piece goes out with the head in one write, so a
-// small file is one packet and a Nagle/delayed-ACK stall has nothing to wait
-// for. False when the connection cannot be used afterwards: the peer went, or
-// the file turned out shorter than its size said.
+/* Send `head`, then -- for a GET -- `length` bytes of `file` after the first
+ * `skip`, in pieces. The first piece goes out with the head in one write, so a
+ * small file is one packet and a Nagle/delayed-ACK stall has nothing to wait
+ * for. False when the connection cannot be used afterwards: the peer went, or
+ * the file turned out shorter than its size said. */
 bool did_send_file(io.Stream stream, bytes head, io.File file, int skip, int length, bool should_send_body) {
     if (!should_send_body || length == 0) {
         return did_write_all(stream, head);
@@ -1019,8 +1019,8 @@ bool did_deliver(io.Stream stream, http.Request request, Answer answer, bool is_
     }
 }
 
-// Whether a request the parser refused is answered (with its 400 or 431) or
-// just dropped (a connection that is already gone).
+/* Whether a request the parser refused is answered (with its 400 or 431) or
+ * just dropped (a connection that is already gone). */
 bool is_answerable(http.Error error) {
     match (error) {
         case Syntax: {
@@ -1080,8 +1080,8 @@ bool is_answerable(http.Error error) {
     }
 }
 
-// The answer to a request that could not be read, and the end of the
-// connection: the framing of whatever follows it can no longer be trusted.
+/* The answer to a request that could not be read, and the end of the
+ * connection: the framing of whatever follows it can no longer be trusted. */
 void refuse_unreadable(io.Stream stream, http.Error error) {
     if (!is_answerable(error)) {
         return;
@@ -1093,12 +1093,12 @@ void refuse_unreadable(io.Stream stream, http.Error error) {
     bool did_send = did_write_all(stream, head);
 }
 
-/// Serve requests on `stream` until the peer stops, either side says `close`,
-/// or `http.MAX_REQUESTS` have been answered. The number answered.
-///
-/// A stream that cannot be read or written ends the loop quietly, as
-/// `http.serve_stream` does; a request that cannot be parsed is answered with
-/// its 400 or 431 first.
+/** Serve requests on `stream` until the peer stops, either side says `close`,
+ * or `http.MAX_REQUESTS` have been answered. The number answered.
+ *
+ * A stream that cannot be read or written ends the loop quietly, as
+ * `http.serve_stream` does; a request that cannot be parsed is answered with
+ * its 400 or 431 first. */
 pub int serve(io.Stream stream, Site site) {
     io.Stream guarded = guard(stream);
     int served = 0;

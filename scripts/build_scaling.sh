@@ -36,7 +36,7 @@ if [ ! -x "$LANGC" ]; then
     exit 1
 fi
 
-"$LANGC" --emit-c "main.$LANG_EXT" -o "$W/httpserver.c" || exit 1
+"$LANGC" -emit-c "main.$LANG_EXT" --out "$W/httpserver.c" || exit 1
 "$CC" "$OPT" -ffp-contract=off -Wall -Wextra -Werror -I "$M31_ROOT/runtime" -pthread \
       -o "$OUT" "$W/httpserver.c" bench/greenthread_probe.c \
       "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" \

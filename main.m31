@@ -1,26 +1,26 @@
-// httpserver -- a "Hello, World!" HTTP/1.1 server over lib/net/http.m31's real
-// Handler/serve machinery, built to prove (and measure) what tonight's
-// concurrency fix bought: every accepted connection gets its own green
-// thread, so N simultaneous clients are served concurrently rather than one
-// at a time.
-//
-//   httpserver                      listen on 0.0.0.0:8080
-//   httpserver --port 9000          listen on 0.0.0.0:9000   (--p 9000, --port=9000)
-//   httpserver --host 127.0.0.1     listen on a specific address
-//   httpserver --tls-cert chain.pem --tls-key key.pem     serve https instead
-//   httpserver --help               generated; also --version and --completions bash|zsh|fish
-//
-// Why this does not just call `http.serve(ln, hello)`: that function is
-// documented (lib/net/http.m31, "One connection at a time, and why") to serve
-// one connection to completion before accepting the next, because a
-// *borrowed* `Handler` parameter cannot be moved into a `spawn`ed green
-// thread. `hello` below sidesteps that: a plain top-level function used
-// where a one-method interface is expected is, per docs/closures-decision.md
-// §3.4 ("No captures"), one static, immortal instance per (function,
-// interface) pair -- free across threads, nothing to move or clone. So this
-// program writes its own accept loop (the same shape as
-// `runtime/net_concurrency_demo/main.m31`), `spawn`ing `handle_connection` per
-// accepted connection and calling the public `http.serve_connection` inside it.
+/* httpserver -- a "Hello, World!" HTTP/1.1 server over lib/net/http.m31's real
+ * Handler/serve machinery, built to prove (and measure) what tonight's
+ * concurrency fix bought: every accepted connection gets its own green
+ * thread, so N simultaneous clients are served concurrently rather than one
+ * at a time.
+ *
+ *   httpserver                      listen on 0.0.0.0:8080
+ *   httpserver --port 9000          listen on 0.0.0.0:9000   (--p 9000, --port=9000)
+ *   httpserver --host 127.0.0.1     listen on a specific address
+ *   httpserver --tls-cert chain.pem --tls-key key.pem     serve https instead
+ *   httpserver --help               generated; also --version and --completions bash|zsh|fish
+ *
+ * Why this does not just call `http.serve(ln, hello)`: that function is
+ * documented (lib/net/http.m31, "One connection at a time, and why") to serve
+ * one connection to completion before accepting the next, because a
+ * *borrowed* `Handler` parameter cannot be moved into a `spawn`ed green
+ * thread. `hello` below sidesteps that: a plain top-level function used
+ * where a one-method interface is expected is, per docs/closures-decision.md
+ * §3.4 ("No captures"), one static, immortal instance per (function,
+ * interface) pair -- free across threads, nothing to move or clone. So this
+ * program writes its own accept loop (the same shape as
+ * `runtime/net_concurrency_demo/main.m31`), `spawn`ing `handle_connection` per
+ * accepted connection and calling the public `http.serve_connection` inside it. */
 import args;
 import HTTP_fileserver;
 import fs;
@@ -31,19 +31,19 @@ import os;
 import timer;
 import tls.tlsserver;
 
-// **Deliberately no `set_read_timeout`/`set_write_timeout` on an established
-// connection.** A client that opens a connection and never sends anything
-// ties up one green thread (~8 KB of stack, not an OS thread) until it
-// disconnects; that is the trade this server's README spells out. It is no
-// longer a carrier problem: `lib/net.m31`'s timeouts now park only the green
-// thread that waits, so neither a bounded nor an unbounded wait ever holds a
-// carrier (the older `poll(2)`-on-the-carrier behavior that
-// bench/BENCHMARK.md, "A second finding", measured is gone from the
-// standard library). A deployment that wants idle connections reaped can add
-// the timeout without that cost.
+/* **Deliberately no `set_read_timeout`/`set_write_timeout` on an established
+ * connection.** A client that opens a connection and never sends anything
+ * ties up one green thread (~8 KB of stack, not an OS thread) until it
+ * disconnects; that is the trade this server's README spells out. It is no
+ * longer a carrier problem: `lib/net.m31`'s timeouts now park only the green
+ * thread that waits, so neither a bounded nor an unbounded wait ever holds a
+ * carrier (the older `poll(2)`-on-the-carrier behavior that
+ * bench/BENCHMARK.md, "A second finding", measured is gone from the
+ * standard library). A deployment that wants idle connections reaped can add
+ * the timeout without that cost. */
 
-// The whole application. Every request, from every connection, on every
-// green thread, gets the same fixed reply.
+/* The whole application. Every request, from every connection, on every
+ * green thread, gets the same fixed reply. */
 const str BODY = "Hello, World!\n";
 
 http.Response hello(http.Request request) {
@@ -52,13 +52,13 @@ http.Response hello(http.Request request) {
 
 // One accepted connection, on its own green thread, to its end.
 void handle_connection(net.Conn connection) {
-    // `serve_connection` already answers a malformed request and closes on its
-    // own; a transport-level `Err` here (socket gone, peer reset) is not
-    // this server's failure either -- one connection's end is not the
-    // server's (same reasoning `http.serve`'s own doc comment gives).
-    //
-    // The stream goes through `HTTP_fileserver.guard`: m31 0.3.2's request parser
-    // traps (ending the whole process) on a request target that is not UTF-8.
+    /* `serve_connection` already answers a malformed request and closes on its
+     * own; a transport-level `Err` here (socket gone, peer reset) is not
+     * this server's failure either -- one connection's end is not the
+     * server's (same reasoning `http.serve`'s own doc comment gives).
+     *
+     * The stream goes through `HTTP_fileserver.guard`: m31 0.3.2's request parser
+     * traps (ending the whole process) on a request target that is not UTF-8. */
     match (http.serve_stream(HTTP_fileserver.guard(connection), hello)) {
         case Ok(int served): {
         }
@@ -68,15 +68,15 @@ void handle_connection(net.Conn connection) {
     Result<bool, io.Error> closed = connection.close();
 }
 
-// The same, serving a directory (`--root`). `site` is this connection's own
-// copy (see `accept_loop`).
+/* The same, serving a directory (`--root`). `site` is this connection's own
+ * copy (see `accept_loop`). */
 void handle_static_connection(net.Conn connection, HTTP_fileserver.Site site) {
     int served = HTTP_fileserver.serve(connection, site);
     Result<bool, io.Error> closed = connection.close();
 }
 
-// The one function an accepted connection is spawned into: a move into a
-// `spawn` cannot sit in a branch, so the choice is made inside the thread.
+/* The one function an accepted connection is spawned into: a move into a
+ * `spawn` cannot sit in a branch, so the choice is made inside the thread. */
 void handle_accepted(net.Conn connection, HTTP_fileserver.Site site, bool is_static) {
     if (is_static) {
         handle_static_connection(connection, site);
@@ -85,15 +85,15 @@ void handle_accepted(net.Conn connection, HTTP_fileserver.Site site, bool is_sta
     }
 }
 
-// The pause after a transient accept error: `http.serve`'s own (10 ms), and
-// it parks this green thread only.
+/* The pause after a transient accept error: `http.serve`'s own (10 ms), and
+ * it parks this green thread only. */
 const int ACCEPT_BACKOFF_MS = 10;
 
-// A failed accept. The weather (out of descriptors, a client that gave up in
-// the backlog) is not the server's failure: pause and ask again, as
-// `http.serve` does. An out-of-descriptors accept leaves the connection
-// queued, so asking at once would spin. Anything else means the listener is
-// no good, and that ends the process.
+/* A failed accept. The weather (out of descriptors, a client that gave up in
+ * the backlog) is not the server's failure: pause and ask again, as
+ * `http.serve` does. An out-of-descriptors accept leaves the connection
+ * queued, so asking at once would spin. Anything else means the listener is
+ * no good, and that ends the process. */
 void refuse_or_back_off(net.Error error) {
     if (!error.is_transient()) {
         trap("accept: " + error.to_str());
@@ -101,12 +101,12 @@ void refuse_or_back_off(net.Error error) {
     timer.sleep_ms(ACCEPT_BACKOFF_MS);
 }
 
-// Accept forever, one `spawn` per connection -- the whole point of tonight's
-// fix: a slow or slow-reading client on one green thread never blocks
-// another connection's green thread, because neither blocks the carrier.
-//
-// With a site, each connection is handed its own deep copy of it: `spawn`
-// moves its arguments, and what moves must be owned by nobody else.
+/* Accept forever, one `spawn` per connection -- the whole point of tonight's
+ * fix: a slow or slow-reading client on one green thread never blocks
+ * another connection's green thread, because neither blocks the carrier.
+ *
+ * With a site, each connection is handed its own deep copy of it: `spawn`
+ * moves its arguments, and what moves must be owned by nobody else. */
 void accept_loop(net.Listener listener, HTTP_fileserver.Site site, bool is_static) {
     while (true) {
         match (listener.accept()) {
@@ -121,43 +121,43 @@ void accept_loop(net.Listener listener, HTTP_fileserver.Site site, bool is_stati
 }
 
 // --- https -------------------------------------------------------------------
-//
-// With `--tls-cert` and `--tls-key` the listener speaks TLS 1.3 instead of
-// plain HTTP (never both on one port), and everything after the handshake is
-// the plain path's behavior: the same `hello` handler, keep-alive, the
-// `http.MAX_REQUESTS` cap, the refusal of malformed requests, and no read or
-// write timeout on an established connection.
-//
-// The handshake is the one place a peer can make this server wait before it
-// has said anything, so it is kept off the accept loop and off the
-// per-connection green threads:
-//
-//   - The accept loop only hands each raw connection to a bounded pool of
-//     `--tls-handshake-workers` handshake workers (a channel), so a stalled
-//     handshake can never stop `accept`.
-//   - `tlsserver.accept` is given `--tls-handshake-timeout-ms` (default
-//     5 s) for each read of the handshake, and its own default 30 s
-//     deadline for the whole handshake, so a client that connects and
-//     sends nothing, stalls mid-handshake, or drips a byte at a time frees
-//     its worker and its socket when the limit fires. Those waits park the
-//     worker's green thread only, never a carrier, so established
-//     connections keep running however many handshakes are stalled and the
-//     pool size is just how many handshakes (one signature each) run at
-//     once.
-//   - A finished handshake is moved to its own green thread, exactly like a
-//     plain connection, and the worker goes back to the channel.
-//
-// Each worker loads its own `tlsserver.Config` from the files: a `Config`
-// holds refcounted objects and refcounts are not atomic, so it cannot be
-// shared between green threads (docs/reference.md §8.3). `start_tls` has
-// already refused a bad pair, before the port is opened.
-//
-// Nothing here prints or logs a byte of the key or of any certificate:
-// `ConfigError.to_str()` is payload-free by contract, and the only things
-// that are printed are the file names the operator typed.
+/*
+ * With `--tls-cert` and `--tls-key` the listener speaks TLS 1.3 instead of
+ * plain HTTP (never both on one port), and everything after the handshake is
+ * the plain path's behavior: the same `hello` handler, keep-alive, the
+ * `http.MAX_REQUESTS` cap, the refusal of malformed requests, and no read or
+ * write timeout on an established connection.
+ *
+ * The handshake is the one place a peer can make this server wait before it
+ * has said anything, so it is kept off the accept loop and off the
+ * per-connection green threads:
+ *
+ *   - The accept loop only hands each raw connection to a bounded pool of
+ *     `--tls-handshake-workers` handshake workers (a channel), so a stalled
+ *     handshake can never stop `accept`.
+ *   - `tlsserver.accept` is given `--tls-handshake-timeout-ms` (default
+ *     5 s) for each read of the handshake, and its own default 30 s
+ *     deadline for the whole handshake, so a client that connects and
+ *     sends nothing, stalls mid-handshake, or drips a byte at a time frees
+ *     its worker and its socket when the limit fires. Those waits park the
+ *     worker's green thread only, never a carrier, so established
+ *     connections keep running however many handshakes are stalled and the
+ *     pool size is just how many handshakes (one signature each) run at
+ *     once.
+ *   - A finished handshake is moved to its own green thread, exactly like a
+ *     plain connection, and the worker goes back to the channel.
+ *
+ * Each worker loads its own `tlsserver.Config` from the files: a `Config`
+ * holds refcounted objects and refcounts are not atomic, so it cannot be
+ * shared between green threads (docs/reference.md §8.3). `start_tls` has
+ * already refused a bad pair, before the port is opened.
+ *
+ * Nothing here prints or logs a byte of the key or of any certificate:
+ * `ConfigError.to_str()` is payload-free by contract, and the only things
+ * that are printed are the file names the operator typed. */
 
-// How many accepted connections may wait for a handshake worker. Past this
-// the accept loop waits, and the kernel's listen backlog takes over.
+/* How many accepted connections may wait for a handshake worker. Past this
+ * the accept loop waits, and the kernel's listen backlog takes over. */
 const int HANDSHAKE_QUEUE = 256;
 
 // One finished TLS handshake, on its own green thread, to its end.
@@ -184,8 +184,8 @@ void handle_accepted_secure(tlsserver.Conn secure, HTTP_fileserver.Site site, bo
     }
 }
 
-// The certificate chain and key, or the reason they cannot serve. Never any
-// of their bytes.
+/* The certificate chain and key, or the reason they cannot serve. Never any
+ * of their bytes. */
 tlsserver.Config load_tls_config(str chain_path, str key_path) {
     match (tlsserver.load_config_files(chain_path, key_path)) {
         case Ok(tlsserver.Config config): {
@@ -199,18 +199,18 @@ tlsserver.Config load_tls_config(str chain_path, str key_path) {
     }
 }
 
-// The next raw connection's handshake. The connection is held only inside
-// this function: a finished `tlsserver.Conn` owns its socket, and moving it
-// to a green thread of its own needs that to be the only reference.
+/* The next raw connection's handshake. The connection is held only inside
+ * this function: a finished `tlsserver.Conn` owns its socket, and moving it
+ * to a green thread of its own needs that to be the only reference. */
 Result<tlsserver.Conn, tlsserver.Error> next_handshake(Chan<net.Conn> pending, tlsserver.Config config, int timeout_ms) {
     net.Conn raw = recv(pending);
     return tlsserver.accept(raw, config, timeout_ms: timeout_ms);
 }
 
-// A handshake worker: take a raw connection, run the TLS handshake with the
-// bounded per-read timeout, and on success give the connection a green
-// thread of its own. A failed handshake has already closed its socket
-// (`tlsserver.accept`'s contract) and is nobody's failure but the peer's.
+/* A handshake worker: take a raw connection, run the TLS handshake with the
+ * bounded per-read timeout, and on success give the connection a green
+ * thread of its own. A failed handshake has already closed its socket
+ * (`tlsserver.accept`'s contract) and is nobody's failure but the peer's. */
 void handshake_worker(Chan<net.Conn> pending, str chain_path, str key_path, int timeout_ms, HTTP_fileserver.Site site, bool is_static) {
     tlsserver.Config config = load_tls_config(chain_path, key_path);
     while (true) {
@@ -224,15 +224,15 @@ void handshake_worker(Chan<net.Conn> pending, str chain_path, str key_path, int 
     }
 }
 
-// Refuse a bad chain/key pair now, before the port is opened. The Config
-// itself is dropped: each handshake worker loads its own.
+/* Refuse a bad chain/key pair now, before the port is opened. The Config
+ * itself is dropped: each handshake worker loads its own. */
 void check_tls_config(str chain_path, str key_path) {
     tlsserver.Config checked = load_tls_config(chain_path, key_path);
 }
 
-// Serve https on `listener` forever: start the handshake workers, then
-// hand every accepted connection to them. Like `accept_loop`, but each
-// connection goes to a handshake worker first.
+/* Serve https on `listener` forever: start the handshake workers, then
+ * hand every accepted connection to them. Like `accept_loop`, but each
+ * connection goes to a handshake worker first. */
 void serve_tls(net.Listener listener, str chain_path, str key_path, int workers, int timeout_ms, HTTP_fileserver.Site site, bool is_static) {
     Chan<net.Conn> pending = Chan<net.Conn>(HANDSHAKE_QUEUE);
     for (int i in 0 .. workers) {
@@ -251,19 +251,19 @@ void serve_tls(net.Listener listener, str chain_path, str key_path, int workers,
 }
 
 // Keep in step with `version` in the `deps` file.
-const str VERSION = "0.7.0";
+const str VERSION = "0.7.1";
 
 args.Parser cli = args.Parser("httpserver", summary: "a \"Hello, World!\" HTTP server, one green thread per connection, or a static file server with --root");
 cli.version = VERSION;
 cli.epilog = "exit status: 0 never (it serves until killed), 1 cannot listen or bad certificate, 2 usage error";
 cli.value("host", help: "address to listen on", placeholder: "HOST", default: "0.0.0.0");
 cli.integer("port", short: "p", help: "port to listen on", placeholder: "PORT", default: "8080");
-// 65535: deliberately more than any real deployment needs -- the OS clamps
-// this to its own configured ceiling regardless (net.listen's own doc
-// comment, lib/net.m31), so asking for more than anyone needs is how this
-// gets "whatever this host actually allows" without this program reading
-// a sysctl itself. An operator who needs a specific, audited number
-// instead of whatever the clamp happens to be overrides it with --backlog.
+/* 65535: deliberately more than any real deployment needs -- the OS clamps
+ * this to its own configured ceiling regardless (net.listen's own doc
+ * comment, lib/net.m31), so asking for more than anyone needs is how this
+ * gets "whatever this host actually allows" without this program reading
+ * a sysctl itself. An operator who needs a specific, audited number
+ * instead of whatever the clamp happens to be overrides it with --backlog. */
 cli.value("tls-cert", help: "serve https: PEM certificate chain, leaf first (needs --tls-key)", placeholder: "FILE");
 cli.value("tls-key", help: "serve https: PEM private key of the leaf, Ed25519 or ECDSA P-256 (needs --tls-cert)", placeholder: "FILE");
 cli.integer("tls-handshake-timeout-ms", help: "https: give up on a handshake read after this long", placeholder: "MS", default: "5000");
@@ -308,10 +308,10 @@ match (cli.parse(argv)) {
                 str host = parsed.value("host").or("0.0.0.0");
                 int port = parsed.integer("port").or(8080);
                 int backlog = parsed.integer("backlog").or(65535);
-                // `net.listen` would `trap` on a bad port (it is not this
-                // library's job to make a CLI's job for it); a program that
-                // took the number from a user's command line wants a
-                // message and a nonzero exit instead of a crash.
+                /* `net.listen` would `trap` on a bad port (it is not this
+                 * library's job to make a CLI's job for it); a program that
+                 * took the number from a user's command line wants a
+                 * message and a nonzero exit instead of a crash. */
                 if (port < 0 || port > 65535) {
                     io.eprint("httpserver: --port " + port.to_str() + ": a port is 0..65535");
                     os.exit(2);
@@ -360,20 +360,20 @@ match (cli.parse(argv)) {
                     io.eprint("httpserver: --tls-handshake-workers " + handshake_workers.to_str() + ": must be at least 1");
                     os.exit(2);
                 }
-                // Refuse an unusable certificate/key pair before the port
-                // is opened.
+                /* Refuse an unusable certificate/key pair before the port
+                 * is opened. */
                 if (is_tls) {
                     check_tls_config(chain_path, key_path);
                 }
                 match (net.listen(host, port, backlog: backlog)) {
                     case Ok(net.Listener listener): {
-                        // The requested value, not an attempt to read back
-                        // what the OS actually settled on (no portable way
-                        // to ask a listening socket its own effective
-                        // backlog) -- this is exactly the number --backlog's
-                        // own default comment explains: usually a stand-in
-                        // for "whatever this host's real ceiling is", not a
-                        // guarantee this host granted it in full.
+                        /* The requested value, not an attempt to read back
+                         * what the OS actually settled on (no portable way
+                         * to ask a listening socket its own effective
+                         * backlog) -- this is exactly the number --backlog's
+                         * own default comment explains: usually a stand-in
+                         * for "whatever this host's real ceiling is", not a
+                         * guarantee this host granted it in full. */
                         if (is_tls) {
                             print("httpserver: listening on " + host + ":" + listener.local().port().to_str() + " (https, backlog " + backlog.to_str() + ")");
                             serve_tls(listener, chain_path, key_path, handshake_workers, handshake_timeout, site, is_static);
